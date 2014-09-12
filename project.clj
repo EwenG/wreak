@@ -12,6 +12,7 @@
             :dev-dependencies [[lein-cljsbuild "1.0.3"]]
             :profiles {:dev {:plugins [[lein-cljsbuild "1.0.3"]]}}
             :hooks [leiningen.cljsbuild]
+            :plugins [[codox "0.8.10"]]
             :cljsbuild {:builds [{:id "dev"
                                   :source-paths ["src-cljs"]
                                   :compiler {
@@ -25,5 +26,7 @@
                                               :output-to "resources/prod/public/cljs/wreak.min.js"
                                               :optimizations :advanced
                                               :pretty-print false}}]}
+            :codox {:language :clojurescript
+                    :sources ["src-cljs"]}
             :jvm-opts ["-Xss1G"]                                         ;Avoid stackoverflow when compiling clojurescript (for example, large go-loop macros)
             )

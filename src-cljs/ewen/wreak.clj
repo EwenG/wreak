@@ -1,4 +1,5 @@
 (ns ewen.wreak)
 
-(defmacro with-this [& body]
+(defmacro ^:no-doc with-this
+  [& body]
   `(cljs.core/this-as ~'this (cljs.core/binding [*component* ~'this] ~@body)))

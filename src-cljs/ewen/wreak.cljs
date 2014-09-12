@@ -1,28 +1,42 @@
 (ns ewen.wreak
+  "A React.js wrapper for clojurescript."
   (:require-macros [ewen.wreak :refer [with-this]]))
 
 (def ^:dynamic *component*)
 
 (defn render
+  "Given a ReactJS component, immediately render it, rooted to the
+specified DOM node."
   [component node]
   (.renderComponent js/React component node))
 
-(defn keyword->string [arg]
+(defn keyword->string
+  "Convert a keyword to a string like the cljs.core/name function but also handles
+namespaced keywords."
+  [arg]
   (let [namespace (namespace arg)]
     (if namespace (str namespace "/" (name arg))
                   (name arg))))
 
-(defn get-state [comp]
+(defn get-state
+  "Return the state of the component."
+  [comp]
   (when-let [react-state (.-state comp)]
     (aget react-state (keyword->string ::state))))
 
-(defn replace-state! [comp next-state]
+(defn replace-state!
+  "Replace the state of the component."
+  [comp next-state]
   (.replaceState comp (js-obj (keyword->string ::state) next-state)))
 
-(defn get-props [comp]
+(defn get-props
+  "Return the props of the component."
+  [comp]
   (-> comp .-props (aget (keyword->string ::props))))
 
-(defn get-statics [comp]
+(defn get-statics
+  "Return the statics associated with the component."
+  [comp]
   (-> comp .-props (aget (keyword->string ::statics))))
 
 
@@ -109,7 +123,19 @@
   (apply js-obj (mapcat (fn [[k v]] [(keyword->string k) v]) in-map)))
 
 
-(defn component [name methods-map]
+(defn component
+  "Given a name and a map of keyword to lifecycle methods,
+return a react component as if created with React.createClass.
+
+TODO Add a schema for methods-map.
+
+Any entry of methods-map which is not a react.js lifecycle method
+will be merged into the returned javascript object.
+
+By default, the shouldComponentUpdate is set to take advantage
+of clojurescript persistent datastructures.
+By default, displayName is set to the provided name."
+  [name methods-map]
   (let [default-methods {:shouldComponentUpdate
                                       (fn [next-props next-state]
                                         (this-as this
@@ -123,6 +149,8 @@
       (react-component (->> (merge {::props props ::statics statics} react-keys)
                             map->js-obj)))))
 
-(defn mixin [methods-map]
+(defn mixin
+  "Return a react.js mixin."
+  [methods-map]
   (let [methods-map (bind-methods-args-mixin methods-map)]
     (map->js-obj methods-map)))

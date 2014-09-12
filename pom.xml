@@ -6,6 +6,7 @@
   <version>0.1.0</version>
   <name>wreak</name>
   <description>React.js wrapper for clojurescript</description>
+  <url>https://github.com/EwenG/wreak</url>
   <licenses>
     <license>
       <name>Eclipse Public License</name>
@@ -15,7 +16,7 @@
   <scm>
     <connection>scm:git:git://github.com/EwenG/wreak.git</connection>
     <developerConnection>scm:git:ssh://git@github.com/EwenG/wreak.git</developerConnection>
-    <tag>HEAD
+    <tag>60da075d3a7fb372b6fab13d95ce040da2d039e5
 </tag>
     <url>https://github.com/EwenG/wreak</url>
   </scm>
