@@ -14,24 +14,29 @@ Create a component
 
 #+begin_src clojure
 
+(ns my-namespace
+  (:require [ewen.wreak :refer [component *component* render]]))
+
 ;Create a component
 (def my-component
   (component "my-component"
              {:render (fn [props state statics]
                         (let [comp *component*] ;*component* is bound to the React component
-                          (.div js/React.DOM null "Hello " this.props.name)))
+                          (.div js/React.DOM nil "Hello")))
               :getInitialState (fn [props statics]
                                  {:demo-val "This for demonstration purpose"})
               :componentDidMount (fn [props state statics]
-                                  ;Initialize your component here
-                                  )
+                                   ;Initialize your component here
+                                   )
               :componentWillUnmount (fn [props state statics]
                                       ;Cleanup actions here
-                                     )}))
+                                      )}))
 
 ;Render the component
-(render (my-component props statics) 
-(.getElementById js/document "root-node"))
+(let [props {}
+      statics {}]
+  (render (my-component props statics)
+          (.getElementById js/document "root-node")))
 
 #+end_src
 
