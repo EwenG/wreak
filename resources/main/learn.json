@@ -3,6 +3,7 @@
 		"name": "Wreak",
 		"description": "Wreak is a React.js wrapper for clojurescript.",
 		"homepage": "https://github.com/EwenG/wreak",
+		"examples": [],
 		"link_groups": []
 	},
 	"templates": {
