@@ -40,6 +40,7 @@ namespaced keywords."
   (-> comp .-props (aget (keyword->string ::statics))))
 
 
+(def ^:dynamic comp-tree-param (atom {:parent :root :children []}))
 
 (defn bind-lifecycle-method-args [[method-key method]]
   (cond (= :getInitialState method-key)
@@ -103,10 +104,14 @@ namespaced keywords."
         (= :render method-key)
         {:render (fn []
                    (with-this
-                     (method
-                       (get-props *component*)
-                       (get-state *component*)
-                       (get-statics *component*))))}
+                     (binding [comp-tree-param (atom (assoc @comp-tree-param :parent this))]
+                       (binding [comp-tree-param (atom (assoc @comp-tree-param :children []))]
+                         (let [r (method
+                                   (get-props *component*)
+                                   (get-state *component*)
+                                   (get-statics *component*))]
+                           (.log js/console (str @comp-tree-param))
+                           r)))))}
         :else {method-key method}))
 
 (defn bind-methods-args-comp [methods-args]
@@ -146,8 +151,12 @@ By default, displayName is set to the provided name."
         methods-map (bind-methods-args-comp methods-map)
         react-component (.createClass js/React (clj->js methods-map))]
     (fn [props statics react-keys]
-      (react-component (->> (merge {::props props ::statics statics} react-keys)
-                            map->js-obj)))))
+      #_(.log js/console (str @comp-tree-param))
+      (let [comp (react-component (->> (merge {::props props ::statics statics} react-keys)
+                                  map->js-obj))]
+        (aset comp "parent" (:parent @comp-tree-param))
+        (swap! comp-tree-param assoc :children (conj (:children @comp-tree-param) comp))
+        comp))))
 
 (defn mixin
   "Return a react.js mixin."
