@@ -8,13 +8,14 @@
             :test-paths ["test"]
             :resource-paths ["resources/main"]
             :dependencies [[org.clojure/clojure "1.6.0"]
-                           [org.clojure/clojurescript "0.0-2311"]]
+                           [org.clojure/clojurescript "0.0-2311"]
+                           [org.clojure/core.async "0.1.319.0-6b1aca-alpha"]]
             :dev-dependencies [[lein-cljsbuild "1.0.3"]]
             :profiles {:dev {:plugins [[lein-cljsbuild "1.0.3"]]}}
             :hooks [leiningen.cljsbuild]
             :plugins [[codox "0.8.10"]]
             :cljsbuild {:builds [{:id "dev"
-                                  :source-paths ["src-cljs"]
+                                  :source-paths ["src-cljs" "/home/ewen/clojure/datascript/src"]
                                   :compiler {
                                               :output-to "resources/dev/public/cljs/wreak.js"
                                               :output-dir "resources/dev/public/cljs/"

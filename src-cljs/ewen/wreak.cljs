@@ -1,14 +1,15 @@
 (ns ewen.wreak
   "A React.js wrapper for clojurescript."
-  (:require-macros [ewen.wreak :refer [with-this]]))
+  (:require [cljs.core.async :as async]
+            [datascript :as ds])
+  (:require-macros [ewen.wreak :refer [with-this]]
+                   [cljs.core.async.macros :refer [go go-loop]] ))
+
+(def ^:dynamic *dirty-comps* nil)
+(def ^:dynamic *db* nil)
+(def ^:dynamic *tx-mult*)
 
 (def ^:dynamic *component*)
-
-(defn render
-  "Given a ReactJS component, immediately render it, rooted to the
-specified DOM node."
-  [component node]
-  (.renderComponent js/React component node))
 
 (defn keyword->string
   "Convert a keyword to a string like the cljs.core/name function but also handles
@@ -21,8 +22,7 @@ namespaced keywords."
 (defn get-state
   "Return the state of the component."
   [comp]
-  (when-let [react-state (.-state comp)]
-    (aget react-state (keyword->string ::state))))
+  (aget comp (keyword->string ::state)))
 
 (defn replace-state!
   "Replace the state of the component."
@@ -40,15 +40,13 @@ namespaced keywords."
   (-> comp .-props (aget (keyword->string ::statics))))
 
 
-(def ^:dynamic comp-tree-param (atom {:parent :root :children []}))
-
 (defn bind-lifecycle-method-args [[method-key method]]
   (cond (= :getInitialState method-key)
         {:getInitialState (fn [] (with-this
                                    (let [init-state (method
                                                       (get-props *component*)
-                                                      (get-statics *component*))]
-                                     (js-obj (keyword->string ::state) init-state))))}
+                                                      *db*)]
+                                     (reset! (get-state *component*) init-state))))}
         (= :getDefaultProps method-key)
         {:getDefaultProps (fn [] (with-this (method)))}
         (= :componentWillMount method-key)
@@ -71,8 +69,8 @@ namespaced keywords."
                                   (method
                                     (get-props *component*)
                                     (aget next-props (keyword->string ::props))
-                                    (get-state *component*)
-                                    (aget next-state (keyword->string ::state))
+                                    (.-state *component*)
+                                    next-state
                                     (get-statics *component*))))}
         (= :componentDidUpdate method-key)
         {:componentDidUpdate (fn [prev-props prev-state]
@@ -80,8 +78,8 @@ namespaced keywords."
                                  (method
                                    (aget prev-props (keyword->string ::props))
                                    (get-props *component*)
-                                   (aget prev-state (keyword->string ::state))
-                                   (get-state *component*)
+                                   prev-state
+                                   (.-state *component*)
                                    (get-statics *component*))))}
         (= :componentWillUnmount method-key)
         {:componentWillUnmount (fn []
@@ -98,19 +96,22 @@ namespaced keywords."
                                                    (get-statics *component*))))}
         :else {method-key method}))
 
+(def ^:dynamic comp-tree-param (atom {:parent :root :children [] :depth 0}))
+
 (defn bind-other-method-args [[method-key method]]
   (cond (= :shouldComponentUpdate method-key)
         {:shouldComponentUpdate method}
         (= :render method-key)
         {:render (fn []
                    (with-this
-                     (binding [comp-tree-param (atom (assoc @comp-tree-param :parent this))]
-                       (binding [comp-tree-param (atom (assoc @comp-tree-param :children []))]
+                     (let [depth (.-depth this)]
+                       (binding [comp-tree-param (atom (assoc @comp-tree-param :parent this
+                                                                               :children []
+                                                                               :depth (inc depth)))]
                          (let [r (method
                                    (get-props *component*)
-                                   (get-state *component*)
-                                   (get-statics *component*))]
-                           (.log js/console (str @comp-tree-param))
+                                   (.-state *component*))]
+                           (aset this "children" (:children @comp-tree-param))
                            r)))))}
         :else {method-key method}))
 
@@ -144,17 +145,25 @@ By default, displayName is set to the provided name."
   (let [default-methods {:shouldComponentUpdate
                                       (fn [next-props next-state]
                                         (this-as this
-                                                 (or (not= (get-state this) next-state)
-                                                     (not= (get-props this) next-props))))
+                                                 (.-dirty this)))
                          :displayName name}
         methods-map (merge default-methods methods-map)
         methods-map (bind-methods-args-comp methods-map)
         react-component (.createClass js/React (clj->js methods-map))]
-    (fn [props statics react-keys]
-      #_(.log js/console (str @comp-tree-param))
-      (let [comp (react-component (->> (merge {::props props ::statics statics} react-keys)
-                                  map->js-obj))]
+    (fn [props]
+      (let [react-key (select-keys props [:key])
+            props (dissoc props :key)
+            state (atom nil)
+            comp (react-component (->> (merge {::props props} react-key)
+                                        map->js-obj))]
+        (add-watch state ::state-watch (fn [_ _ _ new]
+                                         (aset comp "state" new)
+                                         (aset comp "dirty" true)))
+        (aset comp (keyword->string ::state) state)
+        (aset comp "dirty" false)
+        (aset comp "tx-mult" *tx-mult*)
         (aset comp "parent" (:parent @comp-tree-param))
+        (aset comp "depth" (:depth @comp-tree-param))
         (swap! comp-tree-param assoc :children (conj (:children @comp-tree-param) comp))
         comp))))
 
@@ -163,3 +172,36 @@ By default, displayName is set to the provided name."
   [methods-map]
   (let [methods-map (bind-methods-args-mixin methods-map)]
     (map->js-obj methods-map)))
+
+(extend-type cljs.core.async.impl.channels/ManyToManyChannel
+  ds/IPublish
+  (publish [this report]
+    (go (async/>! this report))))
+
+(def roots (atom {}))
+
+(defn detach-root
+  "Given a DOM target remove its render loop if one exists."
+  [node]
+  (when-let [f (get @roots node)]
+    (f)))
+
+(defn render
+  "Given a ReactJS component, immediately render it, rooted to the
+specified DOM node."
+  [component props node db conn]
+  (detach-root node)
+  (let [tx-mult (async/mult (async/chan))
+        callback-listener (async/chan)]
+    (binding [*db* db
+              *tx-mult* tx-mult]
+      (.renderComponent js/React (component props) node))
+    (async/pipe callback-listener (async/muxch* tx-mult))
+    (ds/listen! conn callback-listener)
+    ;; store fn to remove previous root render loop
+    (swap! roots assoc node
+           (fn []
+             (ds/unlisten! conn callback-listener)
+             (async/close! (async/muxch* tx-mult))
+             (swap! roots dissoc node)
+             (js/React.unmountComponentAtNode node)))))
