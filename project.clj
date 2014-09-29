@@ -1,4 +1,4 @@
-(defproject ewen/wreak "0.1.0-SNAPSHOT"
+(defproject ewen/wreak "0.2.0-SNAPSHOT"
             :description "React.js wrapper for clojurescript"
             :url "https://github.com/EwenG/wreak"
             :license {:name "Eclipse Public License"

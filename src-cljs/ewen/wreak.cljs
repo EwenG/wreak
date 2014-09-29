@@ -5,9 +5,9 @@
   (:require-macros [ewen.wreak :refer [with-this]]
                    [cljs.core.async.macros :refer [go go-loop]] ))
 
-(def ^:dynamic *dirty-comps* nil)
 (def ^:dynamic *db* nil)
 (def ^:dynamic *tx-mult*)
+(def ^:dynamic *dirty-state-components*)
 
 (def ^:dynamic *component*)
 
@@ -96,7 +96,7 @@ namespaced keywords."
                                                    (get-statics *component*))))}
         :else {method-key method}))
 
-(def ^:dynamic comp-tree-param (atom {:parent :root :children [] :depth 0}))
+(def ^:dynamic comp-tree-param (atom {:ancestor :root :children [] :depth 0}))
 
 (defn bind-other-method-args [[method-key method]]
   (cond (= :shouldComponentUpdate method-key)
@@ -105,7 +105,7 @@ namespaced keywords."
         {:render (fn []
                    (with-this
                      (let [depth (.-depth this)]
-                       (binding [comp-tree-param (atom (assoc @comp-tree-param :parent this
+                       (binding [comp-tree-param (atom (assoc @comp-tree-param :ancestor this
                                                                                :children []
                                                                                :depth (inc depth)))]
                          (let [r (method
@@ -145,7 +145,8 @@ By default, displayName is set to the provided name."
   (let [default-methods {:shouldComponentUpdate
                                       (fn [next-props next-state]
                                         (this-as this
-                                                 (.-dirty this)))
+                                                 (or (not= next-props (get-props this))
+                                                   (.-dirty this))))
                          :displayName name}
         methods-map (merge default-methods methods-map)
         methods-map (bind-methods-args-comp methods-map)
@@ -157,12 +158,15 @@ By default, displayName is set to the provided name."
             comp (react-component (->> (merge {::props props} react-key)
                                         map->js-obj))]
         (add-watch state ::state-watch (fn [_ _ _ new]
-                                         (aset comp "state" new)
-                                         (aset comp "dirty" true)))
+                                         (let [dirty-state-components (aget comp "dirty-state-components")]
+                                           (aset comp "state" new)
+                                           (aset comp "render-pending" true)
+                                           (swap! dirty-state-components conj comp))))
         (aset comp (keyword->string ::state) state)
-        (aset comp "dirty" false)
+        (aset comp "dirty-state-components" *dirty-state-components*)
+        (aset comp "render-pending" false)
         (aset comp "tx-mult" *tx-mult*)
-        (aset comp "parent" (:parent @comp-tree-param))
+        (aset comp "ancestor" (:ancestor @comp-tree-param))
         (aset comp "depth" (:depth @comp-tree-param))
         (swap! comp-tree-param assoc :children (conj (:children @comp-tree-param) comp))
         comp))))
@@ -186,22 +190,49 @@ By default, displayName is set to the provided name."
   (when-let [f (get @roots node)]
     (f)))
 
+
+(defn depth-comparator [comp1 comp2]
+  (let [result (compare (.-depth comp1) (.-depth comp2))]
+    (if (not= 0 result)
+      (- result)
+      (if (= comp1 comp2) 0 1))))
+
+(defn lowest-common-ancestor [components]
+  (loop [s (-> (partial sorted-set-by depth-comparator)
+                      (apply components))]
+    (if (<= (count s) 1)
+      (first s)
+      (let [component (first s)
+            ancestor (.-ancestor component)]
+        (recur (-> s
+                   (disj component)
+                   (conj ancestor)))))))
+
 (defn render
-  "Given a ReactJS component, immediately render it, rooted to the
-specified DOM node."
   [component props node db conn]
   (detach-root node)
   (let [tx-mult (async/mult (async/chan))
-        callback-listener (async/chan)]
+        tx-listener (async/chan)
+        dirty-state-components (atom #{})
+        render-pending-roots (atom #{})]
     (binding [*db* db
-              *tx-mult* tx-mult]
+              *tx-mult* tx-mult
+              *dirty-state-components* dirty-state-components]
       (.renderComponent js/React (component props) node))
-    (async/pipe callback-listener (async/muxch* tx-mult))
-    (ds/listen! conn callback-listener)
+    (go-loop []
+             (when-let [tx (async/<! tx-listener)]
+               (async/>! (async/muxch* tx-mult) tx)
+
+               (.log js/console (str @dirty-state-components))
+               (reset! dirty-state-components #{})
+               (recur))
+             (ds/unlisten! conn tx-listener))
+    (ds/listen! conn tx-listener)
     ;; store fn to remove previous root render loop
     (swap! roots assoc node
            (fn []
-             (ds/unlisten! conn callback-listener)
+             (ds/unlisten! conn tx-listener)
+             (async/close! tx-listener)
              (async/close! (async/muxch* tx-mult))
              (swap! roots dissoc node)
              (js/React.unmountComponentAtNode node)))))
