@@ -1,13 +1,13 @@
 (ns ewen.wreak
   "A React.js wrapper for clojurescript."
-  (:require [cljs.core.async :as async]
-            [datascript :as ds])
-  (:require-macros [ewen.wreak :refer [with-this]]
-                   [cljs.core.async.macros :refer [go go-loop]] ))
+  (:require [datascript :as ds])
+  (:require-macros [ewen.wreak :refer [with-this]] ))
 
+(def ^:dynamic *conn* nil)
 (def ^:dynamic *db* nil)
-(def ^:dynamic *tx-mult*)
+(def ^:dynamic *tx-callbacks*)
 (def ^:dynamic *dirty-state-components*)
+(def ^:dynamic *dirty-components-render*)
 
 (def ^:dynamic *component*)
 
@@ -19,50 +19,37 @@ namespaced keywords."
     (if namespace (str namespace "/" (name arg))
                   (name arg))))
 
-(defn get-state
-  "Return the state of the component."
-  [comp]
-  (aget comp (keyword->string ::state)))
-
-(defn replace-state!
-  "Replace the state of the component."
-  [comp next-state]
-  (.replaceState comp (js-obj (keyword->string ::state) next-state)))
 
 (defn get-props
   "Return the props of the component."
   [comp]
   (-> comp .-props (aget (keyword->string ::props))))
 
-(defn get-statics
-  "Return the statics associated with the component."
-  [comp]
-  (-> comp .-props (aget (keyword->string ::statics))))
+(defn update-component [comp]
+  (when (.shouldComponentUpdate comp (get-props comp) (.-state comp))
+    (.forceUpdate comp)))
+
 
 
 (defn bind-lifecycle-method-args [[method-key method]]
   (cond (= :getInitialState method-key)
         {:getInitialState (fn [] (with-this
-                                   (let [init-state (method
-                                                      (get-props *component*)
-                                                      *db*)]
-                                     (reset! (get-state *component*) init-state))))}
+                                   (method
+                                     (get-props *component*)
+                                     *db*)))}
         (= :getDefaultProps method-key)
         {:getDefaultProps (fn [] (with-this (method)))}
         (= :componentWillMount method-key)
         {:componentWillMount (fn []
-                               (with-this
-                                 (method
-                                   (get-props *component*)
-                                   (get-state *component*)
-                                   (get-statics *component*))))}
+                               (method
+                                 (get-props *component*)
+                                 (.-state *component*)))} ;the *component* var is bound after, by hook-methods
         (= :componentDidMount method-key)
         {:componentDidMount (fn []
                               (with-this
                                 (method
                                   (get-props *component*)
-                                  (get-state *component*)
-                                  (get-statics *component*))))}
+                                  (.-state *component*))))}
         (= :componentWillUpdate method-key)
         {:componentWillUpdate (fn [next-props next-state]
                                 (with-this
@@ -70,8 +57,7 @@ namespaced keywords."
                                     (get-props *component*)
                                     (aget next-props (keyword->string ::props))
                                     (.-state *component*)
-                                    next-state
-                                    (get-statics *component*))))}
+                                    next-state)))}
         (= :componentDidUpdate method-key)
         {:componentDidUpdate (fn [prev-props prev-state]
                                (with-this
@@ -79,21 +65,38 @@ namespaced keywords."
                                    (aget prev-props (keyword->string ::props))
                                    (get-props *component*)
                                    prev-state
-                                   (.-state *component*)
-                                   (get-statics *component*))))}
+                                   (.-state *component*))))}
+        (= :dbDidUpdate method-key)
+        {:dbDidUpdate (fn [tx-report]
+                        (with-this
+                          (let [dirty-state-components (aget *component* "dirty-state-components")
+                                state-listener (aget *component* "stateDidUpdate")
+                                old-state (.-state *component*)
+                                new-state (method
+                                            (get-props *component*)
+                                            old-state
+                                            tx-report)]
+                            (if (not= old-state new-state)
+                              (do (aset *component* "state" new-state)
+                                  (swap! dirty-state-components conj *component*)
+                                  (when state-listener (state-listener old-state new-state)))))))}
+        (= :stateDidUpdate method-key)
+        {:stateDidUpdate (fn [old-state new-state]
+                           (with-this
+                             (method (get-props *component*)
+                                     old-state
+                                     new-state)))}
         (= :componentWillUnmount method-key)
         {:componentWillUnmount (fn []
-                                 (with-this (method
-                                              (get-props *component*)
-                                              (get-state *component*)
-                                              (get-statics *component*))))}
+                                 (method
+                                   (get-props *component*)
+                                   (.-state *component*)))}  ;the *component* var is bound after, by hook-methods
         (= :componentWillReceiveProps method-key)
         {:componentWillReceiveProps (fn [next-props]
                                       (with-this (method
                                                    next-props
                                                    (get-props *component*)
-                                                   (get-state *component*)
-                                                   (get-statics *component*))))}
+                                                   (.-state *component*))))}
         :else {method-key method}))
 
 (def ^:dynamic comp-tree-param (atom {:ancestor :root :children [] :depth 0}))
@@ -121,6 +124,19 @@ namespaced keywords."
        (map bind-other-method-args)
        (apply merge)))
 
+(defn before-will-mount []
+  (when-let [dbDidUpdate (.-dbDidUpdate *component*)]
+    (swap! (aget *component* "tx-callbacks") conj dbDidUpdate)))
+
+(defn after-will-unmount []
+  (when-let [dbDidUpdate (.-dbDidUpdate *component*)]
+    (swap! (aget *component* "tx-callbacks") disj dbDidUpdate)))
+
+(defn hook-methods [methods-args]
+  (-> methods-args
+      (assoc :componentWillMount (fn [] (with-this (before-will-mount) ((:componentWillMount methods-args identity)))))
+      (assoc :componentWillUnmount (fn [] (with-this ((:componentWillUnmount methods-args identity)) (after-will-unmount))))))
+
 (defn bind-methods-args-mixin [methods-args]
   (->> (map bind-lifecycle-method-args methods-args)
        (apply merge)))
@@ -146,28 +162,22 @@ By default, displayName is set to the provided name."
                                       (fn [next-props next-state]
                                         (this-as this
                                                  (or (not= next-props (get-props this))
-                                                   (.-dirty this))))
+                                                     (some #(= this) *dirty-components-render*))))
                          :displayName name}
         methods-map (merge default-methods methods-map)
         methods-map (bind-methods-args-comp methods-map)
+        methods-map (hook-methods methods-map)
         react-component (.createClass js/React (clj->js methods-map))]
     (fn [props]
       (let [react-key (select-keys props [:key])
             props (dissoc props :key)
-            state (atom nil)
             comp (react-component (->> (merge {::props props} react-key)
                                         map->js-obj))]
-        (add-watch state ::state-watch (fn [_ _ _ new]
-                                         (let [dirty-state-components (aget comp "dirty-state-components")]
-                                           (aset comp "state" new)
-                                           (aset comp "render-pending" true)
-                                           (swap! dirty-state-components conj comp))))
-        (aset comp (keyword->string ::state) state)
+        (aset comp "tx-callbacks" *tx-callbacks*)
         (aset comp "dirty-state-components" *dirty-state-components*)
-        (aset comp "render-pending" false)
-        (aset comp "tx-mult" *tx-mult*)
         (aset comp "ancestor" (:ancestor @comp-tree-param))
         (aset comp "depth" (:depth @comp-tree-param))
+        (aset comp "conn" *conn*)
         (swap! comp-tree-param assoc :children (conj (:children @comp-tree-param) comp))
         comp))))
 
@@ -177,10 +187,6 @@ By default, displayName is set to the provided name."
   (let [methods-map (bind-methods-args-mixin methods-map)]
     (map->js-obj methods-map)))
 
-(extend-type cljs.core.async.impl.channels/ManyToManyChannel
-  ds/IPublish
-  (publish [this report]
-    (go (async/>! this report))))
 
 (def roots (atom {}))
 
@@ -194,45 +200,83 @@ By default, displayName is set to the provided name."
 (defn depth-comparator [comp1 comp2]
   (let [result (compare (.-depth comp1) (.-depth comp2))]
     (if (not= 0 result)
-      (- result)
+      result
       (if (= comp1 comp2) 0 1))))
 
 (defn lowest-common-ancestor [components]
-  (loop [s (-> (partial sorted-set-by depth-comparator)
-                      (apply components))]
+  (loop [render-pending-components #{}
+         s (-> (partial sorted-set-by (comp - depth-comparator))
+               (apply components))]
     (if (<= (count s) 1)
-      (first s)
+      {:ancestor (first s) :components (conj render-pending-components (first s))}
       (let [component (first s)
             ancestor (.-ancestor component)]
-        (recur (-> s
+        (recur (conj render-pending-components component)
+               (-> s
                    (disj component)
                    (conj ancestor)))))))
+
+(defn same-branch? [comp1 comp2]
+  (let [sorted-comps (sort (comp - depth-comparator) [comp1 comp2])
+        lowest-comp (first sorted-comps)
+        highest-comp (second sorted-comps)]
+    (loop [comp lowest-comp]
+      (if (= (.-depth comp) (.-depth highest-comp))
+        (= comp highest-comp)
+        (recur (.-ancestor comp))))))
+
+(defn update-render-pending [{:keys [tree-roots dirty-components]}
+                             db
+                             {:keys [ancestor components]}]
+  (loop [roots-iterator tree-roots]
+    (if (empty? roots-iterator)
+      {:db db
+        :tree-roots (conj tree-roots ancestor)
+       :dirty-components (clojure.set/union dirty-components components)}
+      (let [root (first roots-iterator)]
+        (if (same-branch? root ancestor)
+          (let [tree (lowest-common-ancestor #{root ancestor})]
+            {:db db
+              :tree-roots       (:ancestor tree)
+             :dirty-components (clojure.set/union dirty-components components (:components tree))})
+          (recur (rest roots-iterator)))))))
+
 
 (defn render
   [component props node db conn]
   (detach-root node)
-  (let [tx-mult (async/mult (async/chan))
-        tx-listener (async/chan)
+  (let [tx-callbacks (atom #{})
         dirty-state-components (atom #{})
-        render-pending-roots (atom #{})]
-    (binding [*db* db
-              *tx-mult* tx-mult
+        render-pending (atom {:db nil :tree-roots #{} :dirty-components #{}})
+        tx-listener (fn [tx-report]
+                      (doseq [tx-callback @tx-callbacks]
+                        (tx-callback tx-report))
+                      (when (not-empty @dirty-state-components)
+                        (swap! render-pending update-render-pending
+                               (:db-after tx-report)
+                               (lowest-common-ancestor @dirty-state-components))
+                        (reset! dirty-state-components #{})))]
+    (binding [*conn* conn
+              *db* db
+              *tx-callbacks* tx-callbacks
               *dirty-state-components* dirty-state-components]
       (.renderComponent js/React (component props) node))
-    (go-loop []
-             (when-let [tx (async/<! tx-listener)]
-               (async/>! (async/muxch* tx-mult) tx)
-
-               (.log js/console (str @dirty-state-components))
-               (reset! dirty-state-components #{})
-               (recur))
-             (ds/unlisten! conn tx-listener))
+    (add-watch render-pending :perform-render
+               (fn [_ _ _ new-render-data]
+                 (let [{:keys [db tree-roots dirty-components]} new-render-data]
+                   (when (not-empty tree-roots)
+                     (reset! render-pending {:db nil :tree-roots #{} :dirty-components #{}})
+                     (binding [*dirty-components-render* dirty-components
+                               *conn* conn
+                               *db* db
+                               *tx-callbacks* tx-callbacks
+                               *dirty-state-components* dirty-state-components]
+                       (doseq [tree-root tree-roots]
+                         (update-component tree-root)))))))
     (ds/listen! conn tx-listener)
     ;; store fn to remove previous root render loop
     (swap! roots assoc node
            (fn []
              (ds/unlisten! conn tx-listener)
-             (async/close! tx-listener)
-             (async/close! (async/muxch* tx-mult))
              (swap! roots dissoc node)
              (js/React.unmountComponentAtNode node)))))
