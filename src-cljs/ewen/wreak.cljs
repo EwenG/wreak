@@ -1,7 +1,9 @@
 (ns ewen.wreak
   "A React.js wrapper for clojurescript."
-  (:require [datascript :as ds])
+  (:require [datascript :as ds]
+            [react-google-closure])
   (:require-macros [ewen.wreak :refer [with-this]] ))
+
 
 (def ^:dynamic *conn* nil)
 (def ^:dynamic *db* nil)
@@ -79,7 +81,7 @@ namespaced keywords."
                             (if (not= old-state new-state)
                               (do (aset *component* "state" new-state)
                                   (swap! dirty-state-components conj *component*)
-                                  (when state-listener (state-listener old-state new-state)))))))}
+                                  (when state-listener (.stateDidUpdate *component* old-state new-state)))))))}
         (= :stateDidUpdate method-key)
         {:stateDidUpdate (fn [old-state new-state]
                            (with-this
@@ -126,11 +128,11 @@ namespaced keywords."
 
 (defn before-will-mount []
   (when-let [dbDidUpdate (.-dbDidUpdate *component*)]
-    (swap! (aget *component* "tx-callbacks") conj dbDidUpdate)))
+    (swap! (aget *component* "tx-callbacks") conj *component*)))
 
 (defn after-will-unmount []
   (when-let [dbDidUpdate (.-dbDidUpdate *component*)]
-    (swap! (aget *component* "tx-callbacks") disj dbDidUpdate)))
+    (swap! (aget *component* "tx-callbacks") disj *component*)))
 
 (defn hook-methods [methods-args]
   (-> methods-args
@@ -231,13 +233,13 @@ By default, displayName is set to the provided name."
   (loop [roots-iterator tree-roots]
     (if (empty? roots-iterator)
       {:db db
-        :tree-roots (conj tree-roots ancestor)
+       :tree-roots (conj tree-roots ancestor)
        :dirty-components (clojure.set/union dirty-components components)}
       (let [root (first roots-iterator)]
         (if (same-branch? root ancestor)
           (let [tree (lowest-common-ancestor #{root ancestor})]
             {:db db
-              :tree-roots       (:ancestor tree)
+             :tree-roots       (:ancestor tree)
              :dirty-components (clojure.set/union dirty-components components (:components tree))})
           (recur (rest roots-iterator)))))))
 
@@ -250,7 +252,7 @@ By default, displayName is set to the provided name."
         render-pending (atom {:db nil :tree-roots #{} :dirty-components #{}})
         tx-listener (fn [tx-report]
                       (doseq [tx-callback @tx-callbacks]
-                        (tx-callback tx-report))
+                        (.dbDidUpdate tx-callback tx-report))
                       (when (not-empty @dirty-state-components)
                         (swap! render-pending update-render-pending
                                (:db-after tx-report)
@@ -262,10 +264,10 @@ By default, displayName is set to the provided name."
               *dirty-state-components* dirty-state-components]
       (.renderComponent js/React (component props) node))
     (add-watch render-pending :perform-render
-               (fn [_ _ _ new-render-data]
-                 (let [{:keys [db tree-roots dirty-components]} new-render-data]
-                   (when (not-empty tree-roots)
-                     (reset! render-pending {:db nil :tree-roots #{} :dirty-components #{}})
+               (fn [_ _ _ _]
+                 (let [{:keys [db tree-roots dirty-components] :as render-data} @render-pending]
+                   (when (and (not-empty tree-roots))
+                     (compare-and-set! render-pending render-data {:db nil :tree-roots #{} :dirty-components #{}})
                      (binding [*dirty-components-render* dirty-components
                                *conn* conn
                                *db* db
