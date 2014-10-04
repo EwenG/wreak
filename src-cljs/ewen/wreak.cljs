@@ -43,15 +43,16 @@ namespaced keywords."
         {:getDefaultProps (fn [] (with-this (method)))}
         (= :componentWillMount method-key)
         {:componentWillMount (fn []
-                               (method
-                                 (get-props *component*)
-                                 (.-state *component*)))} ;the *component* var is bound after, by hook-methods
+                               (with-this (method
+                                            (get-props *component*)
+                                            (.-state *component*))))}
         (= :componentDidMount method-key)
         {:componentDidMount (fn []
                               (with-this
                                 (method
                                   (get-props *component*)
-                                  (.-state *component*))))}
+                                  (.-state *component*)
+                                  *db*)))}
         (= :componentWillUpdate method-key)
         {:componentWillUpdate (fn [next-props next-state]
                                 (with-this
@@ -90,9 +91,9 @@ namespaced keywords."
                                      new-state)))}
         (= :componentWillUnmount method-key)
         {:componentWillUnmount (fn []
-                                 (method
-                                   (get-props *component*)
-                                   (.-state *component*)))}  ;the *component* var is bound after, by hook-methods
+                                 (with-this (method
+                                              (get-props *component*)
+                                              (.-state *component*))))}
         (= :componentWillReceiveProps method-key)
         {:componentWillReceiveProps (fn [next-props]
                                       (with-this (method
@@ -136,8 +137,9 @@ namespaced keywords."
 
 (defn hook-methods [methods-args]
   (-> methods-args
-      (assoc :componentWillMount (fn [] (with-this (before-will-mount) ((:componentWillMount methods-args identity)))))
-      (assoc :componentWillUnmount (fn [] (with-this ((:componentWillUnmount methods-args identity)) (after-will-unmount))))))
+      (assoc :componentWillMount (fn [] (with-this (before-will-mount) ((:componentWillMount methods-args (fn []))))))
+      (assoc :componentWillUnmount (fn [] (with-this ((:componentWillUnmount methods-args (fn [])))
+                                                     (after-will-unmount))))))
 
 (defn bind-methods-args-mixin [methods-args]
   (->> (map bind-lifecycle-method-args methods-args)
@@ -282,3 +284,20 @@ By default, displayName is set to the provided name."
              (ds/unlisten! conn tx-listener)
              (swap! roots dissoc node)
              (js/React.unmountComponentAtNode node)))))
+
+
+;Mixins
+
+(defn component-id-mixin
+  ([name] (component-id-mixin name true))
+  ([name retract-on-unmount]
+   (mixin  (cond-> {:componentWillMount (fn [_ _]
+                                         (let [id (-> (ds/transact! (.-conn *component*) [{:db/id -1
+                                                                                           ::name name}])
+                                                      :tempids
+                                                      (get -1))]
+                                           (aset *component* ::id id)))}
+                  retract-on-unmount
+                  (assoc :componentWillUnmount (fn [_ _]
+                                                 (ds/transact! (.-conn *component*) [[:db.fn/retractEntity
+                                                                                      (aget *component* ::id)]])))))))

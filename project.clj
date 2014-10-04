@@ -14,7 +14,7 @@
             :hooks [leiningen.cljsbuild]
             :plugins [[codox "0.8.10"]]
             :cljsbuild {:builds [{:id "dev"
-                                  :source-paths ["src-cljs" "/home/ewen/clojure/datascript/src"]
+                                  :source-paths ["src-cljs"]
                                   :compiler {
                                               :output-to "resources/dev/public/cljs/wreak.js"
                                               :output-dir "resources/dev/public/cljs/"
