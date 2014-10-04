@@ -3,7 +3,7 @@
   <groupId>ewen</groupId>
   <artifactId>wreak</artifactId>
   <packaging>jar</packaging>
-  <version>0.1.0</version>
+  <version>0.2.0-SNAPSHOT</version>
   <name>wreak</name>
   <description>React.js wrapper for clojurescript</description>
   <url>https://github.com/EwenG/wreak</url>
@@ -16,7 +16,7 @@
   <scm>
     <connection>scm:git:git://github.com/EwenG/wreak.git</connection>
     <developerConnection>scm:git:ssh://git@github.com/EwenG/wreak.git</developerConnection>
-    <tag>60da075d3a7fb372b6fab13d95ce040da2d039e5
+    <tag>a06a8a8ed1adf8e107029484078743312cab879c
 </tag>
     <url>https://github.com/EwenG/wreak</url>
   </scm>
