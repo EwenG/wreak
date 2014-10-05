@@ -1,7 +1,6 @@
 (ns ewen.wreak
   "A React.js wrapper for clojurescript."
-  (:require [datascript :as ds]
-            [react-google-closure])
+  (:require [datascript :as ds])
   (:require-macros [ewen.wreak :refer [with-this]] ))
 
 
@@ -102,7 +101,7 @@ namespaced keywords."
                                                    (.-state *component*))))}
         :else {method-key method}))
 
-(def ^:dynamic comp-tree-param (atom {:ancestor :root :children [] :depth 0}))
+(def ^:dynamic *comp-tree-param* (atom {:ancestor :root :children [] :depth 0}))
 
 (defn bind-other-method-args [[method-key method]]
   (cond (= :shouldComponentUpdate method-key)
@@ -111,13 +110,13 @@ namespaced keywords."
         {:render (fn []
                    (with-this
                      (let [depth (.-depth this)]
-                       (binding [comp-tree-param (atom (assoc @comp-tree-param :ancestor this
+                       (binding [*comp-tree-param* (atom (assoc @*comp-tree-param* :ancestor this
                                                                                :children []
                                                                                :depth (inc depth)))]
                          (let [r (method
                                    (get-props *component*)
                                    (.-state *component*))]
-                           (aset this "children" (:children @comp-tree-param))
+                           (aset this "children" (:children @*comp-tree-param*))
                            r)))))}
         :else {method-key method}))
 
@@ -128,6 +127,12 @@ namespaced keywords."
        (apply merge)))
 
 (defn before-will-mount []
+  (aset *component* "conn" *conn*)
+  (aset *component* "dirty-state-components" *dirty-state-components*)
+  (aset *component* "tx-callbacks" *tx-callbacks*)
+  (aset *component* "ancestor" (:ancestor @*comp-tree-param*))
+  (aset *component* "depth" (:depth @*comp-tree-param*))
+  (swap! *comp-tree-param* assoc :children (conj (:children @*comp-tree-param*) *component*))
   (when-let [dbDidUpdate (.-dbDidUpdate *component*)]
     (swap! (aget *component* "tx-callbacks") conj *component*)))
 
@@ -141,9 +146,6 @@ namespaced keywords."
       (assoc :componentWillUnmount (fn [] (with-this ((:componentWillUnmount methods-args (fn [])))
                                                      (after-will-unmount))))))
 
-(defn bind-methods-args-mixin [methods-args]
-  (->> (map bind-lifecycle-method-args methods-args)
-       (apply merge)))
 
 (defn map->js-obj [in-map]
   (apply js-obj (mapcat (fn [[k v]] [(keyword->string k) v]) in-map)))
@@ -177,19 +179,15 @@ By default, displayName is set to the provided name."
             props (dissoc props :key)
             comp (react-component (->> (merge {::props props} react-key)
                                         map->js-obj))]
-        (aset comp "tx-callbacks" *tx-callbacks*)
-        (aset comp "dirty-state-components" *dirty-state-components*)
-        (aset comp "ancestor" (:ancestor @comp-tree-param))
-        (aset comp "depth" (:depth @comp-tree-param))
-        (aset comp "conn" *conn*)
-        (swap! comp-tree-param assoc :children (conj (:children @comp-tree-param) comp))
         comp))))
 
-(defn mixin
+#_(defn mixin
   "Return a react.js mixin."
   [methods-map]
   (let [methods-map (bind-methods-args-mixin methods-map)]
     (map->js-obj methods-map)))
+
+
 
 
 (def roots (atom {}))
@@ -291,13 +289,33 @@ By default, displayName is set to the provided name."
 (defn component-id-mixin
   ([name] (component-id-mixin name true))
   ([name retract-on-unmount]
-   (mixin  (cond-> {:componentWillMount (fn [_ _]
-                                         (let [id (-> (ds/transact! (.-conn *component*) [{:db/id -1
-                                                                                           ::name name}])
-                                                      :tempids
-                                                      (get -1))]
-                                           (aset *component* ::id id)))}
-                  retract-on-unmount
-                  (assoc :componentWillUnmount (fn [_ _]
-                                                 (ds/transact! (.-conn *component*) [[:db.fn/retractEntity
-                                                                                      (aget *component* ::id)]])))))))
+   (cond-> {:componentWillMount (fn [_ _]
+                                  (let [id (-> (ds/transact! (.-conn *component*) [{:db/id -1
+                                                                                              ::name name}])
+                                               :tempids
+                                               (get -1))]
+                                    (aset *component* ::id id)))}
+           retract-on-unmount
+           (assoc :componentWillUnmount (fn [_ _]
+                                          (ds/transact! (.-conn *component*) [[:db.fn/retractEntity
+                                                                                         (aget *component* ::id)]]))))))
+
+(def lifecycle-methods #{:componentWillMount :componentDidMount :componentWillUpdate :componentDidUpdate
+                        :componentWillUnmount :componentWillReceiveProps :dbDidUpdate :stateDidUpdate})
+
+(defn make-partial-db-did-update [db-did-update props tx-report]
+  (fn [state]
+    (db-did-update props state tx-report)))
+
+(defn mixin [& maps]
+  (let [lifecycle-no-db (disj lifecycle-methods :dbDidUpdate)
+        transformed-map (->> (map #(select-keys % lifecycle-no-db) maps)
+                             (apply (partial merge-with juxt)))
+        db-did-update-fns (map :dbDidUpdate maps)
+        db-did-update-fn (fn [props state tx-report]
+                           (->> db-did-update-fns
+                                (map #(make-partial-db-did-update % props tx-report))
+                                (apply juxt)))
+        other-methods (apply (partial merge-with (fn [val1 val2] val1)) maps)]
+    (-> (merge other-methods transformed-map)
+        (assoc :dbDidUpdate db-did-update-fn))))
