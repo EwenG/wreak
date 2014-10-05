@@ -42,9 +42,10 @@ namespaced keywords."
         {:getDefaultProps (fn [] (with-this (method)))}
         (= :componentWillMount method-key)
         {:componentWillMount (fn []
-                               (with-this (method
-                                            (get-props *component*)
-                                            (.-state *component*))))}
+                               (method
+                                 (get-props *component*)
+                                 (.-state *component*)))}        ;componentWillMount is wrapped by with-this in
+                                                                 ;hook-methods
         (= :componentDidMount method-key)
         {:componentDidMount (fn []
                               (with-this
@@ -72,27 +73,31 @@ namespaced keywords."
         {:dbDidUpdate (fn [tx-report]
                         (with-this
                           (let [dirty-state-components (aget *component* "dirty-state-components")
-                                state-listener (aget *component* "stateDidUpdate")
+                                state-listener (aget *component* "stateWillUpdate")
                                 old-state (.-state *component*)
                                 new-state (method
                                             (get-props *component*)
                                             old-state
-                                            tx-report)]
-                            (if (not= old-state new-state)
-                              (do (aset *component* "state" new-state)
-                                  (swap! dirty-state-components conj *component*)
-                                  (when state-listener (.stateDidUpdate *component* old-state new-state)))))))}
-        (= :stateDidUpdate method-key)
-        {:stateDidUpdate (fn [old-state new-state]
+                                            tx-report)
+                                new-state (if (and (not= old-state new-state)
+                                                     state-listener)
+                                            (.stateWillUpdate *component* old-state new-state)
+                                            new-state)]
+                            (when (not= old-state new-state)
+                              (aset *component* "state" new-state)
+                              (swap! dirty-state-components conj *component*)))))}
+        (= :stateWillUpdate method-key)
+        {:stateWillUpdate (fn [old-state new-state]
                            (with-this
                              (method (get-props *component*)
                                      old-state
                                      new-state)))}
         (= :componentWillUnmount method-key)
         {:componentWillUnmount (fn []
-                                 (with-this (method
-                                              (get-props *component*)
-                                              (.-state *component*))))}
+                                 (method
+                                   (get-props *component*)
+                                   (.-state *component*)))}   ;componentWillUnmount is wrapped by with-this in
+                                                              ;hook-methods
         (= :componentWillReceiveProps method-key)
         {:componentWillReceiveProps (fn [next-props]
                                       (with-this (method
@@ -300,22 +305,48 @@ By default, displayName is set to the provided name."
                                           (ds/transact! (.-conn *component*) [[:db.fn/retractEntity
                                                                                          (aget *component* ::id)]]))))))
 
-(def lifecycle-methods #{:componentWillMount :componentDidMount :componentWillUpdate :componentDidUpdate
-                        :componentWillUnmount :componentWillReceiveProps :dbDidUpdate :stateDidUpdate})
+(def react-lifecycle-methods #{:componentWillMount :componentDidMount :componentWillUpdate :componentDidUpdate
+                        :componentWillUnmount :componentWillReceiveProps #_:dbDidUpdate #_:stateWillUpdate})
 
 (defn make-partial-db-did-update [db-did-update props tx-report]
   (fn [state]
     (db-did-update props state tx-report)))
 
+(defn make-partial-get-initial-state [get-initial-state props db]
+  (fn [state]
+    (get-initial-state props db state)))
+
+(defn make-partial-state-will-update [state-will-update props old-state]
+  (fn [state]
+    (state-will-update props old-state state)))
+
 (defn mixin [& maps]
-  (let [lifecycle-no-db (disj lifecycle-methods :dbDidUpdate)
-        transformed-map (->> (map #(select-keys % lifecycle-no-db) maps)
+  (let [transformed-map (->> (map #(select-keys % react-lifecycle-methods) maps)
                              (apply (partial merge-with juxt)))
         db-did-update-fns (map :dbDidUpdate maps)
         db-did-update-fn (fn [props state tx-report]
-                           (->> db-did-update-fns
-                                (map #(make-partial-db-did-update % props tx-report))
-                                (apply juxt)))
+                           (let [f (->> db-did-update-fns
+                                        (map #(make-partial-db-did-update % props tx-report))
+                                        reverse
+                                        (apply comp))]
+                             (f state)))
+        state-will-update-fns (map :stateWillUpdate maps)
+        state-will-update-fn (fn [props old-state new-state]
+                               (let [f (->> state-will-update-fns
+                                            (map #(make-partial-state-will-update % props old-state))
+                                            reverse
+                                            (apply comp))]
+                                 (f new-state)))
+        [first-get-initial-state & rest-get-initial-state] (map :getInitialState maps)
+        get-initial-state-fn (fn [props db]
+                               (let [f (->> rest-get-initial-state
+                                            (map #(make-partial-get-initial-state % props db))
+                                            reverse
+                                            (apply comp))]
+                                 (f (first-get-initial-state props db))))
+        get-initial-state-fn (if (empty? rest-get-initial-state) first-get-initial-state get-initial-state-fn)
         other-methods (apply (partial merge-with (fn [val1 val2] val1)) maps)]
     (-> (merge other-methods transformed-map)
-        (assoc :dbDidUpdate db-did-update-fn))))
+        (assoc :dbDidUpdate db-did-update-fn)
+        (assoc :getInitialState get-initial-state-fn)
+        (assoc :stateWillupdate state-will-update-fn))))
