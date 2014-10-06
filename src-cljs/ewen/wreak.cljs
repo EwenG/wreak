@@ -81,15 +81,16 @@ namespaced keywords."
                                             tx-report)
                                 new-state (if (and (not= old-state new-state)
                                                      state-listener)
-                                            (.stateWillUpdate *component* old-state new-state)
+                                            (.stateWillUpdate *component* (:db-after tx-report) old-state new-state)
                                             new-state)]
                             (when (not= old-state new-state)
                               (aset *component* "state" new-state)
                               (swap! dirty-state-components conj *component*)))))}
         (= :stateWillUpdate method-key)
-        {:stateWillUpdate (fn [old-state new-state]
+        {:stateWillUpdate (fn [db old-state new-state]
                            (with-this
                              (method (get-props *component*)
+                                     db
                                      old-state
                                      new-state)))}
         (= :componentWillUnmount method-key)
@@ -305,22 +306,9 @@ By default, displayName is set to the provided name."
                                           (ds/transact! (.-conn *component*) [[:db.fn/retractEntity
                                                                                          (aget *component* ::id)]]))))))
 
-(def react-lifecycle-methods #{:componentWillMount :componentDidMount :componentWillUpdate :componentDidUpdate
-                        :componentWillUnmount :componentWillReceiveProps #_:dbDidUpdate #_:stateWillUpdate})
 
-(defn make-partial-db-did-update [db-did-update props tx-report]
-  (fn [state]
-    (db-did-update props state tx-report)))
 
-(defn make-partial-get-initial-state [get-initial-state props db]
-  (fn [state]
-    (get-initial-state props db state)))
-
-(defn make-partial-state-will-update [state-will-update props old-state]
-  (fn [state]
-    (state-will-update props old-state state)))
-
-(defn mixin [& maps]
+#_(defn mixin [& maps]
   (let [transformed-map (->> (map #(select-keys % react-lifecycle-methods) maps)
                              (apply (partial merge-with juxt)))
         db-did-update-fns (map :dbDidUpdate maps)
@@ -350,3 +338,55 @@ By default, displayName is set to the provided name."
         (assoc :dbDidUpdate db-did-update-fn)
         (assoc :getInitialState get-initial-state-fn)
         (assoc :stateWillupdate state-will-update-fn))))
+
+(def react-lifecycle-methods #{:componentWillMount :componentDidMount :componentWillUpdate :componentDidUpdate
+                               :componentWillUnmount :componentWillReceiveProps #_:dbDidUpdate #_:stateWillUpdate})
+
+(defn make-partial-db-did-update [db-did-update props tx-report]
+  (fn [state]
+    (db-did-update props state tx-report)))
+
+(defn make-partial-get-initial-state [get-initial-state props db]
+  (fn [state]
+    (get-initial-state props db state)))
+
+(defn make-partial-state-will-update [state-will-update props old-state]
+  (fn [state]
+    (state-will-update props old-state state)))
+
+(defn merge-db-did-update [f1 f2]
+  (fn [props state tx-report]
+    (f2 props (f1 props state tx-report) tx-report)))
+
+(defn merge-state-will-update [f1 f2]
+  (fn [props db old-state new-state]
+    (f2 props db old-state (f1 props db old-state new-state))))
+
+(defn merge-get-initial-state-1 [f1 f2]
+  (fn [props db]
+    (f2 props db (f1 props db))))
+
+(defn merge-get-initial-state-2 [f1 f2]
+  (fn [props db state]
+    (f2 props db (f1 props db state))))
+
+(defn mixin [& maps]
+  (let [react-lifecycle-map (->> (map #(select-keys % react-lifecycle-methods) maps)
+                             (apply (partial merge-with juxt)))
+        db-did-update-map (->> (map #(select-keys % [:dbDidUpdate]) maps)
+                               (apply (partial merge-with merge-db-did-update)))
+        state-will-update-map (->> (map #(select-keys % [:stateWillUpdate]) maps)
+                               (apply (partial merge-with merge-state-will-update)))
+
+        get-initial-state-map-1 (select-keys (first maps) [:getInitialState])
+        get-initial-state-map-2 (->> (map #(select-keys % [:getInitialState]) (rest maps))
+                                     (apply (partial merge-with merge-get-initial-state-2)))
+        get-initial-state-map (merge-with merge-get-initial-state-1
+                                          get-initial-state-map-1
+                                          get-initial-state-map-2) ;TODO What is get-initial-state-map-1 is empty ??
+        other-methods (apply (partial merge-with (fn [val1 val2] val1)) maps)]
+    (merge other-methods
+           react-lifecycle-map
+           db-did-update-map
+           state-will-update-map
+           get-initial-state-map)))
