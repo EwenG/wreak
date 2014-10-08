@@ -12,6 +12,8 @@
 
 (def ^:dynamic *component*)
 
+
+
 (defn keyword->string
   "Convert a keyword to a string like the cljs.core/name function but also handles
 namespaced keywords."
@@ -27,8 +29,21 @@ namespaced keywords."
   (-> comp .-props (aget (keyword->string ::props))))
 
 (defn update-component [comp]
-  (when (.shouldComponentUpdate comp (get-props comp) (.-state comp))
+  (when (and (.shouldComponentUpdate comp (get-props comp) (.-state comp)))
+    (.log js/console (.isMounted comp))
     (.forceUpdate comp)))
+
+(def tx-meta-filters #{:mouse-event})
+
+(defn call-db-did-update? [tx-meta
+                           f-meta
+                           tx-meta-filters]
+  (if-let [filters (->> (:tx-meta-filters tx-meta)
+                        (clojure.set/intersection tx-meta-filters))]
+    (let [f-filters (-> f-meta :tx-meta-filters)]
+      (when (empty? (clojure.set/difference filters f-filters))
+        true))
+    true))
 
 
 
@@ -72,20 +87,23 @@ namespaced keywords."
         (= :dbDidUpdate method-key)
         {:dbDidUpdate (fn [tx-report]
                         (with-this
-                          (let [dirty-state-components (aget *component* "dirty-state-components")
-                                state-listener (aget *component* "stateWillUpdate")
-                                old-state (.-state *component*)
-                                new-state (method
-                                            (get-props *component*)
-                                            old-state
-                                            tx-report)
-                                new-state (if (and (not= old-state new-state)
+                          (when (call-db-did-update? (:tx-meta tx-report)
+                                                     (meta method)
+                                                     tx-meta-filters)
+                            (let [dirty-state-components (aget *component* "dirty-state-components")
+                                  state-listener (aget *component* "stateWillUpdate")
+                                  old-state (.-state *component*)
+                                  new-state (method
+                                              (get-props *component*)
+                                              old-state
+                                              tx-report)
+                                  new-state (if (and (not= old-state new-state)
                                                      state-listener)
-                                            (.stateWillUpdate *component* (:db-after tx-report) old-state new-state)
-                                            new-state)]
-                            (when (not= old-state new-state)
-                              (aset *component* "state" new-state)
-                              (swap! dirty-state-components conj *component*)))))}
+                                              (.stateWillUpdate *component* (:db-after tx-report) old-state new-state)
+                                              new-state)]
+                              (when (not= old-state new-state)
+                                (aset *component* "state" new-state)
+                                (swap! dirty-state-components conj *component*))))))}
         (= :stateWillUpdate method-key)
         {:stateWillUpdate (fn [db old-state new-state]
                            (with-this
@@ -272,7 +290,8 @@ By default, displayName is set to the provided name."
     (add-watch render-pending :perform-render
                (fn [_ _ _ _]
                  (let [{:keys [db tree-roots dirty-components] :as render-data} @render-pending]
-                   (when (and (not-empty tree-roots))
+                   (when (and (not-empty tree-roots)
+                              (some #(= node %) @roots))
                      (compare-and-set! render-pending render-data {:db nil :tree-roots #{} :dirty-components #{}})
                      (binding [*dirty-components-render* dirty-components
                                *conn* conn
@@ -308,36 +327,6 @@ By default, displayName is set to the provided name."
 
 
 
-#_(defn mixin [& maps]
-  (let [transformed-map (->> (map #(select-keys % react-lifecycle-methods) maps)
-                             (apply (partial merge-with juxt)))
-        db-did-update-fns (map :dbDidUpdate maps)
-        db-did-update-fn (fn [props state tx-report]
-                           (let [f (->> db-did-update-fns
-                                        (map #(make-partial-db-did-update % props tx-report))
-                                        reverse
-                                        (apply comp))]
-                             (f state)))
-        state-will-update-fns (map :stateWillUpdate maps)
-        state-will-update-fn (fn [props old-state new-state]
-                               (let [f (->> state-will-update-fns
-                                            (map #(make-partial-state-will-update % props old-state))
-                                            reverse
-                                            (apply comp))]
-                                 (f new-state)))
-        [first-get-initial-state & rest-get-initial-state] (map :getInitialState maps)
-        get-initial-state-fn (fn [props db]
-                               (let [f (->> rest-get-initial-state
-                                            (map #(make-partial-get-initial-state % props db))
-                                            reverse
-                                            (apply comp))]
-                                 (f (first-get-initial-state props db))))
-        get-initial-state-fn (if (empty? rest-get-initial-state) first-get-initial-state get-initial-state-fn)
-        other-methods (apply (partial merge-with (fn [val1 val2] val1)) maps)]
-    (-> (merge other-methods transformed-map)
-        (assoc :dbDidUpdate db-did-update-fn)
-        (assoc :getInitialState get-initial-state-fn)
-        (assoc :stateWillupdate state-will-update-fn))))
 
 (def react-lifecycle-methods #{:componentWillMount :componentDidMount :componentWillUpdate :componentDidUpdate
                                :componentWillUnmount :componentWillReceiveProps #_:dbDidUpdate #_:stateWillUpdate})
@@ -356,7 +345,18 @@ By default, displayName is set to the provided name."
 
 (defn merge-db-did-update [f1 f2]
   (fn [props state tx-report]
-    (f2 props (f1 props state tx-report) tx-report)))
+    (let [call-f1? (call-db-did-update? (:tx-meta tx-report)
+                                        (meta f1)
+                                        tx-meta-filters)
+          call-f2? (call-db-did-update? (:tx-meta tx-report)
+                                        (meta f2)
+                                        tx-meta-filters)
+          f1-res (if call-f1?
+                   (f1 props state tx-report)
+                   state)]
+      (if call-f2?
+        (f2 props f1-res tx-report)
+        state))))
 
 (defn merge-state-will-update [f1 f2]
   (fn [props db old-state new-state]

@@ -8,7 +8,8 @@
             :test-paths ["test"]
             :resource-paths ["resources/main"]
             :dependencies [[org.clojure/clojure "1.6.0"]
-                           [org.clojure/clojurescript "0.0-2311"]]
+                           [org.clojure/clojurescript "0.0-2311"]
+                           [datascript "0.4.1"]]
             :dev-dependencies [[lein-cljsbuild "1.0.3"]]
             :profiles {:dev {:plugins [[lein-cljsbuild "1.0.3"]]}}
             :hooks [leiningen.cljsbuild]
