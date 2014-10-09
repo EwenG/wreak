@@ -30,7 +30,6 @@ namespaced keywords."
 
 (defn update-component [comp]
   (when (and (.shouldComponentUpdate comp (get-props comp) (.-state comp)))
-    (.log js/console (.isMounted comp))
     (.forceUpdate comp)))
 
 (def tx-meta-filters #{:mouse-event})
@@ -125,7 +124,6 @@ namespaced keywords."
                                                    (.-state *component*))))}
         :else {method-key method}))
 
-(def ^:dynamic *comp-tree-param* (atom {:ancestor :root :children [] :depth 0}))
 
 (defn bind-other-method-args [[method-key method]]
   (cond (= :shouldComponentUpdate method-key)
@@ -133,15 +131,9 @@ namespaced keywords."
         (= :render method-key)
         {:render (fn []
                    (with-this
-                     (let [depth (.-depth this)]
-                       (binding [*comp-tree-param* (atom (assoc @*comp-tree-param* :ancestor this
-                                                                               :children []
-                                                                               :depth (inc depth)))]
-                         (let [r (method
-                                   (get-props *component*)
-                                   (.-state *component*))]
-                           (aset this "children" (:children @*comp-tree-param*))
-                           r)))))}
+                     (method
+                       (get-props *component*)
+                       (.-state *component*))))}
         :else {method-key method}))
 
 (defn bind-methods-args-comp [methods-args]
@@ -154,9 +146,11 @@ namespaced keywords."
   (aset *component* "conn" *conn*)
   (aset *component* "dirty-state-components" *dirty-state-components*)
   (aset *component* "tx-callbacks" *tx-callbacks*)
-  (aset *component* "ancestor" (:ancestor @*comp-tree-param*))
-  (aset *component* "depth" (:depth @*comp-tree-param*))
-  (swap! *comp-tree-param* assoc :children (conj (:children @*comp-tree-param*) *component*))
+  (let [ancestor (-> *component* .-props (aget (keyword->string ::ancestor)))
+        ancestor-children (.-children ancestor)]
+    (aset *component* "ancestor" ancestor)
+    (aset *component* "depth" (inc (.-depth ancestor)))
+    (aset ancestor "children" (conj ancestor-children *component*)))
   (when-let [dbDidUpdate (.-dbDidUpdate *component*)]
     (swap! (aget *component* "tx-callbacks") conj *component*)))
 
@@ -201,15 +195,13 @@ By default, displayName is set to the provided name."
     (fn [props]
       (let [react-key (select-keys props [:key])
             props (dissoc props :key)
-            comp (react-component (->> (merge {::props props} react-key)
-                                        map->js-obj))]
+            ancestor {::ancestor (or *component* #js {:depth -1 :children []})}
+            comp (react-component (->> (merge {::props props}
+                                              react-key
+                                              ancestor)
+                                       map->js-obj))]
         comp))))
 
-#_(defn mixin
-  "Return a react.js mixin."
-  [methods-map]
-  (let [methods-map (bind-methods-args-mixin methods-map)]
-    (map->js-obj methods-map)))
 
 
 
@@ -263,7 +255,9 @@ By default, displayName is set to the provided name."
         (if (same-branch? root ancestor)
           (let [tree (lowest-common-ancestor #{root ancestor})]
             {:db db
-             :tree-roots       (:ancestor tree)
+             :tree-roots (-> tree-roots
+                             (disj root)
+                             (conj (:ancestor tree)))
              :dirty-components (clojure.set/union dirty-components components (:components tree))})
           (recur (rest roots-iterator)))))))
 
@@ -291,7 +285,7 @@ By default, displayName is set to the provided name."
                (fn [_ _ _ _]
                  (let [{:keys [db tree-roots dirty-components] :as render-data} @render-pending]
                    (when (and (not-empty tree-roots)
-                              (some #(= node %) @roots))
+                              (some #(= node (first %)) @roots))
                      (compare-and-set! render-pending render-data {:db nil :tree-roots #{} :dirty-components #{}})
                      (binding [*dirty-components-render* dirty-components
                                *conn* conn
@@ -371,22 +365,24 @@ By default, displayName is set to the provided name."
     (f2 props db (f1 props db state))))
 
 (defn mixin [& maps]
-  (let [react-lifecycle-map (->> (map #(select-keys % react-lifecycle-methods) maps)
-                             (apply (partial merge-with juxt)))
-        db-did-update-map (->> (map #(select-keys % [:dbDidUpdate]) maps)
-                               (apply (partial merge-with merge-db-did-update)))
-        state-will-update-map (->> (map #(select-keys % [:stateWillUpdate]) maps)
-                               (apply (partial merge-with merge-state-will-update)))
+  (if (= 1 (count maps))
+    (first maps)
+    (let [react-lifecycle-map (->> (map #(select-keys % react-lifecycle-methods) maps)
+                                   (apply (partial merge-with juxt)))
+          db-did-update-map (->> (map #(select-keys % [:dbDidUpdate]) maps)
+                                 (apply (partial merge-with merge-db-did-update)))
+          state-will-update-map (->> (map #(select-keys % [:stateWillUpdate]) maps)
+                                     (apply (partial merge-with merge-state-will-update)))
 
-        get-initial-state-map-1 (select-keys (first maps) [:getInitialState])
-        get-initial-state-map-2 (->> (map #(select-keys % [:getInitialState]) (rest maps))
-                                     (apply (partial merge-with merge-get-initial-state-2)))
-        get-initial-state-map (merge-with merge-get-initial-state-1
-                                          get-initial-state-map-1
-                                          get-initial-state-map-2) ;TODO What is get-initial-state-map-1 is empty ??
-        other-methods (apply (partial merge-with (fn [val1 val2] val1)) maps)]
-    (merge other-methods
-           react-lifecycle-map
-           db-did-update-map
-           state-will-update-map
-           get-initial-state-map)))
+          get-initial-state-map-1 (select-keys (first maps) [:getInitialState])
+          get-initial-state-map-2 (->> (map #(select-keys % [:getInitialState]) (rest maps))
+                                       (apply (partial merge-with merge-get-initial-state-2)))
+          get-initial-state-map (merge-with merge-get-initial-state-1
+                                            get-initial-state-map-1
+                                            get-initial-state-map-2) ;TODO What is get-initial-state-map-1 is empty ??
+          other-methods (apply (partial merge-with (fn [val1 val2] val1)) maps)]
+      (merge other-methods
+             react-lifecycle-map
+             db-did-update-map
+             state-will-update-map
+             get-initial-state-map))))
