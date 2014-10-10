@@ -28,6 +28,15 @@ namespaced keywords."
   [comp]
   (-> comp .-props (aget (keyword->string ::props))))
 
+(defn get-in-props [component k]
+  (-> component .-props (aget (keyword->string k))))
+
+(defn get-conn [component]
+  (get-in-props component ::conn))
+
+(defn get-db [component]
+  (get-in-props component ::db))
+
 (defn update-component [comp]
   (when (and (.shouldComponentUpdate comp (get-props comp) (.-state comp)))
     (.forceUpdate comp)))
@@ -51,7 +60,7 @@ namespaced keywords."
         {:getInitialState (fn [] (with-this
                                    (method
                                      (get-props *component*)
-                                     *db*)))}
+                                     (get-in-props *component* ::db))))}
         (= :getDefaultProps method-key)
         {:getDefaultProps (fn [] (with-this (method)))}
         (= :componentWillMount method-key)
@@ -66,7 +75,7 @@ namespaced keywords."
                                 (method
                                   (get-props *component*)
                                   (.-state *component*)
-                                  *db*)))}
+                                  (get-in-props *component* ::db))))}
         (= :componentWillUpdate method-key)
         {:componentWillUpdate (fn [next-props next-state]
                                 (with-this
@@ -89,7 +98,7 @@ namespaced keywords."
                           (when (call-db-did-update? (:tx-meta tx-report)
                                                      (meta method)
                                                      tx-meta-filters)
-                            (let [dirty-state-components (aget *component* "dirty-state-components")
+                            (let [dirty-state-components (get-in-props *component* ::dirty-state-components)
                                   state-listener (aget *component* "stateWillUpdate")
                                   old-state (.-state *component*)
                                   new-state (method
@@ -142,21 +151,14 @@ namespaced keywords."
        (map bind-other-method-args)
        (apply merge)))
 
+
 (defn before-will-mount []
-  (aset *component* "conn" *conn*)
-  (aset *component* "dirty-state-components" *dirty-state-components*)
-  (aset *component* "tx-callbacks" *tx-callbacks*)
-  (let [ancestor (-> *component* .-props (aget (keyword->string ::ancestor)))
-        ancestor-children (.-children ancestor)]
-    (aset *component* "ancestor" ancestor)
-    (aset *component* "depth" (inc (.-depth ancestor)))
-    (aset ancestor "children" (conj ancestor-children *component*)))
   (when-let [dbDidUpdate (.-dbDidUpdate *component*)]
-    (swap! (aget *component* "tx-callbacks") conj *component*)))
+    (swap! (get-in-props *component* ::tx-callbacks) conj *component*)))
 
 (defn after-will-unmount []
   (when-let [dbDidUpdate (.-dbDidUpdate *component*)]
-    (swap! (aget *component* "tx-callbacks") disj *component*)))
+    (swap! (get-in-props *component* ::tx-callbacks) disj *component*)))
 
 (defn hook-methods [methods-args]
   (-> methods-args
@@ -195,10 +197,15 @@ By default, displayName is set to the provided name."
     (fn [props]
       (let [react-key (select-keys props [:key])
             props (dissoc props :key)
-            ancestor {::ancestor (or *component* #js {:depth -1 :children []})}
+            ancestor (or *component* #js {:props (map->js-obj {::depth -1 ::conn *conn* ::db *db* ::dirty-state-components *dirty-state-components* ::tx-callbacks *tx-callbacks*})})
             comp (react-component (->> (merge {::props props}
                                               react-key
-                                              ancestor)
+                                              {::ancestor ancestor}
+                                              {::depth (inc (get-in-props ancestor ::depth))}
+                                              {::conn (get-in-props ancestor ::conn)}
+                                              {::db (get-in-props ancestor ::db)}
+                                              {::dirty-state-components (get-in-props ancestor ::dirty-state-components)}
+                                              {::tx-callbacks (get-in-props ancestor ::tx-callbacks)})
                                        map->js-obj))]
         comp))))
 
@@ -216,7 +223,8 @@ By default, displayName is set to the provided name."
 
 
 (defn depth-comparator [comp1 comp2]
-  (let [result (compare (.-depth comp1) (.-depth comp2))]
+  (let [result (compare (get-in-props comp1 ::depth)
+                        (get-in-props comp2 ::depth))]
     (if (not= 0 result)
       result
       (if (= comp1 comp2) 0 1))))
@@ -228,7 +236,7 @@ By default, displayName is set to the provided name."
     (if (<= (count s) 1)
       {:ancestor (first s) :components (conj render-pending-components (first s))}
       (let [component (first s)
-            ancestor (.-ancestor component)]
+            ancestor (get-in-props component ::ancestor)]
         (recur (conj render-pending-components component)
                (-> s
                    (disj component)
@@ -239,9 +247,10 @@ By default, displayName is set to the provided name."
         lowest-comp (first sorted-comps)
         highest-comp (second sorted-comps)]
     (loop [comp lowest-comp]
-      (if (= (.-depth comp) (.-depth highest-comp))
+      (if (= (get-in-props comp ::depth)
+             (get-in-props highest-comp ::depth))
         (= comp highest-comp)
-        (recur (.-ancestor comp))))))
+        (recur (get-in-props comp ::ancestor))))))
 
 (defn update-render-pending [{:keys [tree-roots dirty-components]}
                              db
@@ -309,14 +318,14 @@ By default, displayName is set to the provided name."
   ([name] (component-id-mixin name true))
   ([name retract-on-unmount]
    (cond-> {:componentWillMount (fn [_ _]
-                                  (let [id (-> (ds/transact! (.-conn *component*) [{:db/id -1
+                                  (let [id (-> (ds/transact! (get-conn *component*) [{:db/id -1
                                                                                               ::name name}])
                                                :tempids
                                                (get -1))]
                                     (aset *component* ::id id)))}
            retract-on-unmount
            (assoc :componentWillUnmount (fn [_ _]
-                                          (ds/transact! (.-conn *component*) [[:db.fn/retractEntity
+                                          (ds/transact! (get-conn *component*) [[:db.fn/retractEntity
                                                                                          (aget *component* ::id)]]))))))
 
 
