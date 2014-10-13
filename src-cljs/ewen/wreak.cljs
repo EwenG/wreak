@@ -67,8 +67,9 @@ namespaced keywords."
         {:componentWillMount (fn []
                                (method
                                  (get-props *component*)
-                                 (.-state *component*)))}        ;componentWillMount is wrapped by with-this in
-                                                                 ;hook-methods
+                                 (.-state *component*)
+                                 (get-in-props *component* ::db)))}        ;componentWillMount is wrapped by with-this in
+                                                                           ;hook-methods
         (= :componentDidMount method-key)
         {:componentDidMount (fn []
                               (with-this
@@ -156,15 +157,17 @@ namespaced keywords."
   (when-let [dbDidUpdate (.-dbDidUpdate *component*)]
     (swap! (get-in-props *component* ::tx-callbacks) conj *component*)))
 
-(defn after-will-unmount []
+(defn before-will-unmount []
   (when-let [dbDidUpdate (.-dbDidUpdate *component*)]
     (swap! (get-in-props *component* ::tx-callbacks) disj *component*)))
 
+
 (defn hook-methods [methods-args]
   (-> methods-args
-      (assoc :componentWillMount (fn [] (with-this (before-will-mount) ((:componentWillMount methods-args (fn []))))))
-      (assoc :componentWillUnmount (fn [] (with-this ((:componentWillUnmount methods-args (fn [])))
-                                                     (after-will-unmount))))))
+      (assoc :componentWillMount (fn [] (with-this (before-will-mount)
+                                                   ((:componentWillMount methods-args (fn []))))))
+      (assoc :componentWillUnmount (fn [] (with-this  (before-will-unmount)
+                                                      ((:componentWillUnmount methods-args (fn []))))))))
 
 
 (defn map->js-obj [in-map]
@@ -195,6 +198,7 @@ By default, displayName is set to the provided name."
         methods-map (hook-methods methods-map)
         react-component (.createClass js/React (clj->js methods-map))]
     (fn [props]
+      ;TODO the *db* provided to components is wrong. It is the db value at the time when the first component (root) is mounted ! It should be the db value when the component itself is mounted
       (let [react-key (select-keys props [:key])
             props (dissoc props :key)
             ancestor (or *component* #js {:props (map->js-obj {::depth -1 ::conn *conn* ::db *db* ::dirty-state-components *dirty-state-components* ::tx-callbacks *tx-callbacks*})})
@@ -373,25 +377,46 @@ By default, displayName is set to the provided name."
   (fn [props db state]
     (f2 props db (f1 props db state))))
 
+(defn merge-renders [& fns]
+  (let [mixins-render (filter #(-> (meta %) :mixin-render) fns)
+        component-render (filter #(-> (meta %) :mixin-render not) fns)]
+    (when (> (count component-render) 1)
+      (throw (js/Error. "A mixin cannot have more than one component render function.")))
+    (cond
+      (= 0 (count mixins-render)) component-render
+      (= 0 (count component-render)) (vector mixins-render)
+      :else (fn [props state]
+              (apply (partial (first component-render) props state)
+                     (map #(% props state) mixins-render))))))
+
 (defn mixin [& maps]
   (if (= 1 (count maps))
     (first maps)
-    (let [react-lifecycle-map (->> (map #(select-keys % react-lifecycle-methods) maps)
-                                   (apply (partial merge-with juxt)))
-          db-did-update-map (->> (map #(select-keys % [:dbDidUpdate]) maps)
-                                 (apply (partial merge-with merge-db-did-update)))
-          state-will-update-map (->> (map #(select-keys % [:stateWillUpdate]) maps)
-                                     (apply (partial merge-with merge-state-will-update)))
+    (let [render-map {:render (apply merge-renders (->> maps
+                                                  (filter :render)
+                                                  (map :render)
+                                                  flatten))}
+           react-lifecycle-map (->> (map #(select-keys % react-lifecycle-methods) maps)
+                                    (apply (partial merge-with juxt)))
+           db-did-update-map (->> (map #(select-keys % [:dbDidUpdate]) maps)
+                                  (apply (partial merge-with merge-db-did-update)))
+           state-will-update-map (->> (map #(select-keys % [:stateWillUpdate]) maps)
+                                      (apply (partial merge-with merge-state-will-update)))
 
-          get-initial-state-map-1 (select-keys (first maps) [:getInitialState])
-          get-initial-state-map-2 (->> (map #(select-keys % [:getInitialState]) (rest maps))
-                                       (apply (partial merge-with merge-get-initial-state-2)))
-          get-initial-state-map (merge-with merge-get-initial-state-1
-                                            get-initial-state-map-1
-                                            get-initial-state-map-2) ;TODO What is get-initial-state-map-1 is empty ??
-          other-methods (apply (partial merge-with (fn [val1 val2] val1)) maps)]
+           get-initial-state-map-1 (select-keys (first maps) [:getInitialState])
+           get-initial-state-map-2 (->> (map #(select-keys % [:getInitialState]) (rest maps))
+                                        (apply (partial merge-with merge-get-initial-state-2)))
+           get-initial-state-map (merge-with merge-get-initial-state-1
+                                             get-initial-state-map-1
+                                             get-initial-state-map-2) ;TODO What is get-initial-state-map-1 is empty ??
+           other-methods (apply (partial merge-with (fn [val1 val2] val1)) maps)]
       (merge other-methods
+             render-map
              react-lifecycle-map
              db-did-update-map
              state-will-update-map
              get-initial-state-map))))
+
+(defn clone-with-props [component props-updater]
+  (let [component-props (-> (.-props component) js->clj)]
+    (.cloneWithProps js/React.addons component (-> (props-updater component-props) clj->js))))
