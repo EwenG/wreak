@@ -9,6 +9,7 @@
 (def ^:dynamic *tx-callbacks*)
 (def ^:dynamic *dirty-state-components*)
 (def ^:dynamic *dirty-components-render*)
+(def ^:dynamic *tx-meta-filters*)
 
 (def ^:dynamic *component*)
 
@@ -38,7 +39,7 @@ namespaced keywords."
     (aset comp "props" (keyword->string ::db) *db*)
     (.forceUpdate comp)))
 
-(def tx-meta-filters #{:mouse-event})
+#_(def tx-meta-filters #{:mouse-event})
 
 (defn call-db-did-update? [tx-meta
                            f-meta
@@ -96,15 +97,15 @@ namespaced keywords."
         (= :dbDidUpdate method-key)
         {:dbDidUpdate (fn [tx-report]
                         (with-this
-                          (when (call-db-did-update? (:tx-meta tx-report)
-                                                     (meta method)
-                                                     tx-meta-filters)
+                          (if (call-db-did-update? (:tx-meta tx-report)
+                                                   (meta method)
+                                                   (get-in-props *component* ::tx-meta-filters))
                             (let [dirty-state-components (get-in-props *component* ::dirty-state-components)
                                   state-listener (aget *component* "stateWillUpdate")
                                   old-state (.-state *component*)
                                   new-state (method
-                                              {:props (get-props *component*)
-                                               :state old-state
+                                              {:props     (get-props *component*)
+                                               :state     old-state
                                                :tx-report tx-report})
                                   new-state (if (and (not= old-state new-state)
                                                      state-listener)
@@ -112,7 +113,8 @@ namespaced keywords."
                                               new-state)]
                               (when (not= old-state new-state)
                                 (aset *component* "state" new-state)
-                                (swap! dirty-state-components conj *component*))))))}
+                                (swap! dirty-state-components conj *component*)))
+                            (.-state *component*))))}
         (= :stateWillUpdate method-key)
         {:stateWillUpdate (fn [db old-state new-state]
                            (with-this
@@ -202,15 +204,21 @@ By default, displayName is set to the provided name."
     (fn [props]
       (let [react-key (select-keys props [:key])
             props (dissoc props :key)
-            ancestor (or *component* #js {:props (map->js-obj {::depth -1 ::conn *conn* ::db *db* ::dirty-state-components *dirty-state-components* ::tx-callbacks *tx-callbacks*})})
+            ancestor (or *component* #js {:props (map->js-obj {::depth -1
+                                                               ::conn *conn*
+                                                               ::db *db*
+                                                               ::dirty-state-components *dirty-state-components*
+                                                               ::tx-callbacks *tx-callbacks*
+                                                               ::tx-meta-filters *tx-meta-filters*})})
             comp (react-component (->> (merge {::props props}
                                               react-key
-                                              {::ancestor ancestor}
-                                              {::depth (inc (get-in-props ancestor ::depth))}
-                                              {::conn (get-in-props ancestor ::conn)}
-                                              {::db (get-in-props ancestor ::db)}
-                                              {::dirty-state-components (get-in-props ancestor ::dirty-state-components)}
-                                              {::tx-callbacks (get-in-props ancestor ::tx-callbacks)})
+                                              {::ancestor               ancestor
+                                               ::depth                  (inc (get-in-props ancestor ::depth))
+                                               ::conn                   (get-in-props ancestor ::conn)
+                                               ::db                     (get-in-props ancestor ::db)
+                                               ::dirty-state-components (get-in-props ancestor ::dirty-state-components)
+                                               ::tx-callbacks           (get-in-props ancestor ::tx-callbacks)
+                                               ::tx-meta-filters *tx-meta-filters*})
                                        map->js-obj))]
         comp))))
 
@@ -277,44 +285,48 @@ By default, displayName is set to the provided name."
 
 
 (defn render
-  [component props node db conn]
-  (detach-root node)
-  (let [tx-callbacks (atom #{})
-        dirty-state-components (atom #{})
-        render-pending (atom {:db nil :tree-roots #{} :dirty-components #{}})
-        tx-listener (fn [tx-report]
-                      (doseq [tx-callback @tx-callbacks]
-                        (.dbDidUpdate tx-callback tx-report))
-                      (when (not-empty @dirty-state-components)
-                        (swap! render-pending update-render-pending
-                               (:db-after tx-report)
-                               (lowest-common-ancestor @dirty-state-components))
-                        (reset! dirty-state-components #{})))]
-    (binding [*conn* conn
-              *db* db
-              *tx-callbacks* tx-callbacks
-              *dirty-state-components* dirty-state-components]
-      (.renderComponent js/React (component props) node))
-    (add-watch render-pending :perform-render
-               (fn [_ _ _ _]
-                 (let [{:keys [db tree-roots dirty-components] :as render-data} @render-pending]
-                   (when (and (not-empty tree-roots)
-                              (some #(= node (first %)) @roots))
-                     (compare-and-set! render-pending render-data {:db nil :tree-roots #{} :dirty-components #{}})
-                     (binding [*dirty-components-render* dirty-components
-                               *conn* conn
-                               *db* db
-                               *tx-callbacks* tx-callbacks
-                               *dirty-state-components* dirty-state-components]
-                       (doseq [tree-root tree-roots]
-                         (update-component tree-root)))))))
-    (ds/listen! conn tx-listener)
-    ;; store fn to remove previous root render loop
-    (swap! roots assoc node
-           (fn []
-             (ds/unlisten! conn tx-listener)
-             (swap! roots dissoc node)
-             (js/React.unmountComponentAtNode node)))))
+  ([component props node db conn]
+   (render component props node db conn #{}))
+  ([component props node db conn tx-meta-filters]
+   (detach-root node)
+   (let [tx-callbacks (atom #{})
+         dirty-state-components (atom #{})
+         render-pending (atom {:db nil :tree-roots #{} :dirty-components #{}})
+         tx-listener (fn [tx-report]
+                       (doseq [tx-callback @tx-callbacks]
+                         (.dbDidUpdate tx-callback tx-report))
+                       (when (not-empty @dirty-state-components)
+                         (swap! render-pending update-render-pending
+                                (:db-after tx-report)
+                                (lowest-common-ancestor @dirty-state-components))
+                         (reset! dirty-state-components #{})))]
+     (binding [*conn* conn
+               *db* db
+               *tx-callbacks* tx-callbacks
+               *dirty-state-components* dirty-state-components
+               *tx-meta-filters* tx-meta-filters]
+       (.renderComponent js/React (component props) node))
+     (add-watch render-pending :perform-render
+                (fn [_ _ _ _]
+                  (let [{:keys [db tree-roots dirty-components] :as render-data} @render-pending]
+                    (when (and (not-empty tree-roots)
+                               (some #(= node (first %)) @roots))
+                      (compare-and-set! render-pending render-data {:db nil :tree-roots #{} :dirty-components #{}})
+                      (binding [*dirty-components-render* dirty-components
+                                *conn* conn
+                                *db* db
+                                *tx-callbacks* tx-callbacks
+                                *dirty-state-components* dirty-state-components
+                                *tx-meta-filters* tx-meta-filters]
+                        (doseq [tree-root tree-roots]
+                          (update-component tree-root)))))))
+     (ds/listen! conn tx-listener)
+     ;; store fn to remove previous root render loop
+     (swap! roots assoc node
+            (fn []
+              (ds/unlisten! conn tx-listener)
+              (swap! roots dissoc node)
+              (js/React.unmountComponentAtNode node))))))
 
 
 ;Mixins
@@ -344,19 +356,8 @@ By default, displayName is set to the provided name."
 
 
 (defn merge-db-did-update [f1 f2]
-  (fn [{:keys [state tx-report] :as args}]
-    (let [call-f1? (call-db-did-update? (:tx-meta tx-report)
-                                        (meta f1)
-                                        tx-meta-filters)
-          call-f2? (call-db-did-update? (:tx-meta tx-report)
-                                        (meta f2)
-                                        tx-meta-filters)
-          f1-res (if call-f1?
-                   (f1 args)
-                   state)]
-      (if call-f2?
-        (f2 (assoc args :state f1-res))
-        state))))
+  (fn [args]
+    (f2 (assoc args :next-state (f1 args)))))
 
 (defn merge-state-will-update [f1 f2]
   (fn [args]
