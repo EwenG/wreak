@@ -31,11 +31,7 @@ namespaced keywords."
 (defn get-in-props [component k]
   (-> component .-props (aget (keyword->string k))))
 
-(defn get-conn [component]
-  (get-in-props component ::conn))
 
-(defn get-db [component]
-  (get-in-props component ::db))
 
 (defn update-component [comp]
   (when (and (.shouldComponentUpdate comp (get-props comp) (.-state comp)))
@@ -60,40 +56,43 @@ namespaced keywords."
   (cond (= :getInitialState method-key)
         {:getInitialState (fn [] (with-this
                                    (method
-                                     (get-props *component*)
-                                     (get-in-props *component* ::db))))}
+                                     {:props (get-props *component*)
+                                      :db (get-in-props *component* ::db)
+                                      :conn (get-in-props *component* ::conn)})))}
         (= :getDefaultProps method-key)
         {:getDefaultProps (fn [] (with-this (method)))}
         (= :componentWillMount method-key)
         {:componentWillMount (fn []
                                (method
-                                 (get-props *component*)
-                                 (.-state *component*)
-                                 (get-in-props *component* ::db)))}        ;componentWillMount is wrapped by with-this in
-                                                                           ;hook-methods
+                                 {:props (get-props *component*)
+                                  :state (.-state *component*)
+                                  :db (get-in-props *component* ::db)
+                                  :conn (get-in-props *component* ::conn)}))}        ;componentWillMount is wrapped by with-this in
+                                                                                     ;hook-methods
         (= :componentDidMount method-key)
         {:componentDidMount (fn []
                               (with-this
                                 (method
-                                  (get-props *component*)
-                                  (.-state *component*)
-                                  (get-in-props *component* ::db))))}
+                                  {:props (get-props *component*)
+                                   :state (.-state *component*)
+                                   :db (get-in-props *component* ::db)
+                                   :conn (get-in-props *component* ::conn)})))}
         (= :componentWillUpdate method-key)
         {:componentWillUpdate (fn [next-props next-state]
                                 (with-this
                                   (method
-                                    (get-props *component*)
-                                    (aget next-props (keyword->string ::props))
-                                    (.-state *component*)
-                                    next-state)))}
+                                    {:prev-props (get-props *component*)
+                                     :next-props (aget next-props (keyword->string ::props))
+                                     :prev-state (.-state *component*)
+                                     :next-state next-state})))}
         (= :componentDidUpdate method-key)
         {:componentDidUpdate (fn [prev-props prev-state]
                                (with-this
                                  (method
-                                   (aget prev-props (keyword->string ::props))
-                                   (get-props *component*)
-                                   prev-state
-                                   (.-state *component*))))}
+                                   {:prev-props (aget prev-props (keyword->string ::props))
+                                    :next-props (get-props *component*)
+                                    :prev-state prev-state
+                                    :next-state (.-state *component*)})))}
         (= :dbDidUpdate method-key)
         {:dbDidUpdate (fn [tx-report]
                         (with-this
@@ -104,9 +103,9 @@ namespaced keywords."
                                   state-listener (aget *component* "stateWillUpdate")
                                   old-state (.-state *component*)
                                   new-state (method
-                                              (get-props *component*)
-                                              old-state
-                                              tx-report)
+                                              {:props (get-props *component*)
+                                               :state old-state
+                                               :tx-report tx-report})
                                   new-state (if (and (not= old-state new-state)
                                                      state-listener)
                                               (.stateWillUpdate *component* (:db-after tx-report) old-state new-state)
@@ -117,22 +116,23 @@ namespaced keywords."
         (= :stateWillUpdate method-key)
         {:stateWillUpdate (fn [db old-state new-state]
                            (with-this
-                             (method (get-props *component*)
-                                     db
-                                     old-state
-                                     new-state)))}
+                             (method {:props (get-props *component*)
+                                      :db db
+                                      :prev-state old-state
+                                      :next-state new-state})))}
         (= :componentWillUnmount method-key)
         {:componentWillUnmount (fn []
                                  (method
-                                   (get-props *component*)
-                                   (.-state *component*)))}   ;componentWillUnmount is wrapped by with-this in
-                                                              ;hook-methods
+                                   {:props (get-props *component*)
+                                    :state (.-state *component*)
+                                    :conn (get-in-props *component* ::conn)}))}   ;componentWillUnmount is wrapped by with-this in
+                                                                                  ;hook-methods
         (= :componentWillReceiveProps method-key)
         {:componentWillReceiveProps (fn [next-props]
                                       (with-this (method
-                                                   next-props
-                                                   (get-props *component*)
-                                                   (.-state *component*))))}
+                                                   {:next-props next-props
+                                                    :props (get-props *component*)
+                                                    :state (.-state *component*)})))}
         :else {method-key method}))
 
 
@@ -143,8 +143,9 @@ namespaced keywords."
         {:render (fn []
                    (with-this
                      (method
-                       (get-props *component*)
-                       (.-state *component*))))}
+                       {:props (get-props *component*)
+                        :state (.-state *component*)
+                        :conn (get-in-props *component* ::conn)})))}
         :else {method-key method}))
 
 (defn bind-methods-args-comp [methods-args]
@@ -321,16 +322,18 @@ By default, displayName is set to the provided name."
 (defn component-id-mixin
   ([name] (component-id-mixin name true))
   ([name retract-on-unmount]
-   (cond-> {:componentWillMount (fn [_ _]
-                                  (let [id (-> (ds/transact! (get-conn *component*) [{:db/id -1
-                                                                                              ::name name}])
+   (cond-> {:componentWillMount (fn [{:keys [conn]}]
+                                  (let [id (-> (ds/transact! conn
+                                                             [{:db/id -1
+                                                               ::name name}])
                                                :tempids
                                                (get -1))]
                                     (aset *component* ::id id)))}
            retract-on-unmount
-           (assoc :componentWillUnmount (fn [_ _]
-                                          (ds/transact! (get-conn *component*) [[:db.fn/retractEntity
-                                                                                         (aget *component* ::id)]]))))))
+           (assoc :componentWillUnmount (fn [{:keys [conn]}]
+                                          (ds/transact! conn
+                                                        [[:db.fn/retractEntity
+                                                          (aget *component* ::id)]]))))))
 
 
 
@@ -338,20 +341,10 @@ By default, displayName is set to the provided name."
 (def react-lifecycle-methods #{:componentWillMount :componentDidMount :componentWillUpdate :componentDidUpdate
                                :componentWillUnmount :componentWillReceiveProps #_:dbDidUpdate #_:stateWillUpdate})
 
-(defn make-partial-db-did-update [db-did-update props tx-report]
-  (fn [state]
-    (db-did-update props state tx-report)))
 
-(defn make-partial-get-initial-state [get-initial-state props db]
-  (fn [state]
-    (get-initial-state props db state)))
-
-(defn make-partial-state-will-update [state-will-update props old-state]
-  (fn [state]
-    (state-will-update props old-state state)))
 
 (defn merge-db-did-update [f1 f2]
-  (fn [props state tx-report]
+  (fn [{:keys [state tx-report] :as args}]
     (let [call-f1? (call-db-did-update? (:tx-meta tx-report)
                                         (meta f1)
                                         tx-meta-filters)
@@ -359,23 +352,23 @@ By default, displayName is set to the provided name."
                                         (meta f2)
                                         tx-meta-filters)
           f1-res (if call-f1?
-                   (f1 props state tx-report)
+                   (f1 args)
                    state)]
       (if call-f2?
-        (f2 props f1-res tx-report)
+        (f2 (assoc args :state f1-res))
         state))))
 
 (defn merge-state-will-update [f1 f2]
-  (fn [props db old-state new-state]
-    (f2 props db old-state (f1 props db old-state new-state))))
+  (fn [args]
+    (f2 (assoc args :next-state (f1 args)))))
 
 (defn merge-get-initial-state-1 [f1 f2]
-  (fn [props db]
-    (f2 props db (f1 props db))))
+  (fn [args]
+    (f2 (assoc args :state (f1 args)))))
 
 (defn merge-get-initial-state-2 [f1 f2]
-  (fn [props db state]
-    (f2 props db (f1 props db state))))
+  (fn [args]
+    (f2 (assoc args :state (f1 args)))))
 
 (defn merge-renders [& fns]
   (let [mixins-render (filter #(-> (meta %) :mixin-render) fns)
@@ -385,9 +378,9 @@ By default, displayName is set to the provided name."
     (cond
       (= 0 (count mixins-render)) component-render
       (= 0 (count component-render)) (vector mixins-render)
-      :else (fn [props state]
-              (apply (partial (first component-render) props state)
-                     (map #(% props state) mixins-render))))))
+      :else (fn [args]
+              (let [mixin-render-results (mapv #(% args) mixins-render)]
+                ((first component-render) (assoc args :mixin-renders mixin-render-results)))))))
 
 (defn mixin [& maps]
   (if (= 1 (count maps))
