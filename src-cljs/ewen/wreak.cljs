@@ -1,7 +1,7 @@
 (ns ewen.wreak
   "A React.js wrapper for clojurescript."
   (:require [datascript :as ds])
-  (:require-macros [ewen.wreak :refer [with-this]] ))
+  (:require-macros [ewen.wreak :refer [with-this]]))
 
 
 (def ^:dynamic *conn* nil)
@@ -39,6 +39,7 @@ namespaced keywords."
 
 (defn update-component [comp]
   (when (and (.shouldComponentUpdate comp (get-props comp) (.-state comp)))
+    (aset comp "props" (keyword->string ::db) *db*)
     (.forceUpdate comp)))
 
 (def tx-meta-filters #{:mouse-event})
@@ -198,7 +199,6 @@ By default, displayName is set to the provided name."
         methods-map (hook-methods methods-map)
         react-component (.createClass js/React (clj->js methods-map))]
     (fn [props]
-      ;TODO the *db* provided to components is wrong. It is the db value at the time when the first component (root) is mounted ! It should be the db value when the component itself is mounted
       (let [react-key (select-keys props [:key])
             props (dissoc props :key)
             ancestor (or *component* #js {:props (map->js-obj {::depth -1 ::conn *conn* ::db *db* ::dirty-state-components *dirty-state-components* ::tx-callbacks *tx-callbacks*})})
