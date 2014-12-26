@@ -377,7 +377,7 @@ By default, displayName is set to the provided name."
     (when (> (count component-render) 1)
       (throw (js/Error. "A mixin cannot have more than one component render function.")))
     (cond
-      (= 0 (count mixins-render)) component-render
+      (= 0 (count mixins-render)) (first component-render)
       (= 0 (count component-render)) (vector mixins-render)
       :else (fn [args]
               (let [mixin-render-results (mapv #(% args) mixins-render)]
