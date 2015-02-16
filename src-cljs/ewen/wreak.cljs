@@ -4,6 +4,21 @@
   (:require-macros [ewen.wreak :refer [with-this]]))
 
 
+;Always call the wreak listener as the first one to avoid race conditions.
+;TODO Batch render loops calls (for example using a dynamic var) when already inside a render loop to avoid race conditions.
+(set! ds/transact!
+      (fn [conn tx-data & [tx-meta]]
+        (let [report (ds/-transact! conn tx-data tx-meta)
+              listeners (->> @(:listeners (meta conn))
+                             (filter #(not= ::listener (first %))))]
+          (when-let [listener (-> @(:listeners (meta conn))
+                                  ::listener)]
+            (listener report))
+          (doseq [[_ callback] listeners]
+            (callback report))
+          report)))
+
+
 (def ^:dynamic *conn* nil)
 (def ^:dynamic *db* nil)
 (def ^:dynamic *tx-callbacks*)
@@ -320,11 +335,12 @@ By default, displayName is set to the provided name."
                                 *tx-meta-filters* tx-meta-filters]
                         (doseq [tree-root tree-roots]
                           (update-component tree-root)))))))
-     (ds/listen! conn tx-listener)
+
+     (ds/listen! conn ::listener tx-listener)
      ;; store fn to remove previous root render loop
      (swap! roots assoc node
             (fn []
-              (ds/unlisten! conn tx-listener)
+              (ds/unlisten! conn ::listener)
               (swap! roots dissoc node)
               (js/React.unmountComponentAtNode node))))))
 
