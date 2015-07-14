@@ -4,6 +4,7 @@
   (:require-macros [ewen.wreak :refer [with-this]]))
 
 
+
 ;Always call the wreak listener as the first one to avoid race conditions.
 ;TODO Batch render loops calls (for example using a dynamic var) when already inside a render loop to avoid race conditions.
 (set! ds/transact!
