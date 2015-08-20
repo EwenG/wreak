@@ -206,35 +206,54 @@ By default, the shouldComponentUpdate is set to take advantage
 of clojurescript persistent datastructures.
 By default, displayName is set to the provided name."
   [name methods-map]
-  (let [default-methods {:shouldComponentUpdate
-                                      (fn [next-props next-state]
-                                        (this-as this
-                                                 (or (not= next-props (get-props this))
-                                                     (some #(= this) *dirty-components-render*))))
-                         :displayName name}
+  (let [default-methods
+        {:shouldComponentUpdate
+         (fn [next-props next-state]
+           (this-as this
+                    (or (not= next-props (get-props this))
+                        (some #(= this) *dirty-components-render*))))
+         :displayName name}
         methods-map (merge default-methods methods-map)
         methods-map (bind-methods-args-comp methods-map)
         methods-map (hook-methods methods-map)
-        react-component (.createClass js/React (clj->js methods-map))]
+        react-component-class (.createClass
+                               js/React
+                               (clj->js methods-map))
+        react-component (js/React.createFactory react-component-class)]
     (fn [props]
       (let [react-key (select-keys props [:key])
             props (dissoc props :key)
-            ancestor (or *component* #js {:props (map->js-obj {::depth -1
-                                                               ::conn *conn*
-                                                               ::db *db*
-                                                               ::dirty-state-components *dirty-state-components*
-                                                               ::tx-callbacks *tx-callbacks*
-                                                               ::tx-meta-filters *tx-meta-filters*})})
-            comp (react-component (->> (merge {::props props}
-                                              react-key
-                                              {::ancestor               ancestor
-                                               ::depth                  (inc (get-in-props ancestor ::depth))
-                                               ::conn                   (get-in-props ancestor ::conn)
-                                               ::db                     (get-in-props ancestor ::db)
-                                               ::dirty-state-components (get-in-props ancestor ::dirty-state-components)
-                                               ::tx-callbacks           (get-in-props ancestor ::tx-callbacks)
-                                               ::tx-meta-filters *tx-meta-filters*})
-                                       map->js-obj))]
+            ancestor
+            (or
+             *component*
+             #js {:props
+                  (map->js-obj
+                   {::depth -1
+                    ::conn *conn*
+                    ::db *db*
+                    ::dirty-state-components *dirty-state-components*
+                    ::tx-callbacks *tx-callbacks*
+                    ::tx-meta-filters *tx-meta-filters*})})
+            comp
+            (react-component
+             (->>
+              (merge
+               {::props props}
+               react-key
+               {::ancestor               ancestor
+                ::depth                  (inc (get-in-props
+                                               ancestor
+                                               ::depth))
+                ::conn                   (get-in-props ancestor ::conn)
+                ::db                     (get-in-props ancestor ::db)
+                ::dirty-state-components (get-in-props
+                                          ancestor
+                                          ::dirty-state-components)
+                ::tx-callbacks           (get-in-props
+                                          ancestor
+                                          ::tx-callbacks)
+                ::tx-meta-filters *tx-meta-filters*})
+              map->js-obj))]
         comp))))
 
 
@@ -320,7 +339,7 @@ By default, displayName is set to the provided name."
                *tx-callbacks* tx-callbacks
                *dirty-state-components* dirty-state-components
                *tx-meta-filters* tx-meta-filters]
-       (.renderComponent js/React (component props) node))
+       (js/React.render (component props) node))
      (add-watch render-pending :perform-render
                 (fn [_ _ _ _]
                   (let [{:keys [db tree-roots dirty-components] :as render-data} @render-pending]
@@ -427,6 +446,9 @@ By default, displayName is set to the provided name."
              state-will-update-map
              get-initial-state-map))))
 
-(defn clone-with-props [component props-updater]
+(defn clone-element [component props-updater]
   (let [component-props (-> (.-props component) js->clj)]
-    (.cloneWithProps js/React.addons component (-> (props-updater component-props) clj->js))))
+    (js/React.cloneElement component
+                           (->
+                            (props-updater component-props)
+                            clj->js))))
