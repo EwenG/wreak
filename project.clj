@@ -7,27 +7,8 @@
             :source-paths ["src-cljs"]
             :test-paths ["test"]
             :resource-paths ["resources/main"]
-            :dependencies [[org.clojure/clojure "1.6.0"]
-                           [org.clojure/clojurescript "0.0-2311"]
-                           [datascript "0.4.2"]]
-            :dev-dependencies [[lein-cljsbuild "1.0.3"]]
-            :profiles {:dev {:plugins [[lein-cljsbuild "1.0.3"]]}}
-            :hooks [leiningen.cljsbuild]
-            :plugins [[codox "0.8.10"]]
-            :cljsbuild {:builds [{:id "dev"
-                                  :source-paths ["src-cljs"]
-                                  :compiler {
-                                              :output-to "resources/dev/public/cljs/wreak.js"
-                                              :output-dir "resources/dev/public/cljs/"
-                                              :optimizations :none
-                                              :source-map true}}
-                                 {:id "prod"
-                                  :source-paths ["src-cljs"]
-                                  :compiler {
-                                              :output-to "resources/prod/public/cljs/wreak.min.js"
-                                              :optimizations :advanced
-                                              :pretty-print false}}]}
-            :codox {:language :clojurescript
-                    :sources ["src-cljs"]}
+            :dependencies [[org.clojure/clojure "1.7.0"]
+                           [org.clojure/clojurescript "0.0-3308"]
+                           [datascript "0.11.5"]]
             :jvm-opts ["-Xss1G"]                                         ;Avoid stackoverflow when compiling clojurescript (for example, large go-loop macros)
             )
